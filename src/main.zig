@@ -557,25 +557,9 @@ fn runService(app: *const App) i32 {
     var sessions = [_]SessionWorkerSlot{SessionWorkerSlot{}} ** session_worker_slots_max;
 
     var next_accept_poll: u64 = 0;
-    while (!app.sys.programShouldClose()) {
+    var service_loop = r4os.ServiceLoop.init(app.sys, endpoint_handle, .{});
+    while (true) {
         const now = app.sys.ticks();
-        const poll = app.sys.serviceEndpointPoll(endpoint_handle);
-        if (poll < 0) {
-            closeListener(app, config.listen_port, &stats);
-            _ = app.sys.serviceEndpointUnregister(endpoint_handle);
-            logStopSummary(app, &stats, "endpoint-poll");
-            return poll;
-        }
-        if (poll > 0) {
-            const rc = handleRequest(app, endpoint_handle, &stats, &config);
-            if (rc < 0) {
-                closeListener(app, config.listen_port, &stats);
-                _ = app.sys.serviceEndpointUnregister(endpoint_handle);
-                logStopSummary(app, &stats, "endpoint-request");
-                return rc;
-            }
-        }
-
         pollSessionWorkers(app, &stats, sessions[0..], false);
         if (now >= next_accept_poll) {
             if (pollClient(app, &stats, &config, &modern_security, sessions[0..])) {
@@ -585,11 +569,33 @@ fn runService(app: *const App) i32 {
                 next_accept_poll = now + if (idle_ticks == 0) 1 else idle_ticks;
             }
         }
-        // 0.56.27: blockierend auf Endpoint-Requests warten (0.56.19-API);
-        // Accept-Drossel und Worker-Join laufen im Wait-Raster weiter.
-        _ = app.sys.serviceEndpointWait(endpoint_handle, app.sys.ticksFromMilliseconds(rdp_main_loop_wait_ms));
+
+        var deadline = next_accept_poll;
+        if (stats.active_sessions != 0) {
+            const active_ticks = @max(app.sys.ticksFromMilliseconds(rdp_main_loop_wait_ms), 1);
+            deadline = @min(deadline, app.sys.ticks() +| active_ticks);
+        }
+        switch (service_loop.wait(deadline)) {
+            .requests => |pending| {
+                const rc = service_loop.drain(pending, handleRequest, .{ app, endpoint_handle, &stats, &config });
+                if (rc >= 0) continue;
+                closeListener(app, config.listen_port, &stats);
+                _ = app.sys.serviceEndpointUnregister(endpoint_handle);
+                logStopSummary(app, &stats, "endpoint-request");
+                return rc;
+            },
+            .deadline, .idle => {},
+            .stop => break,
+            .failure => |raw| {
+                closeListener(app, config.listen_port, &stats);
+                _ = app.sys.serviceEndpointUnregister(endpoint_handle);
+                logStopSummary(app, &stats, "endpoint-wait");
+                return raw;
+            },
+        }
     }
 
+    service_loop.report(service_name);
     closeListener(app, config.listen_port, &stats);
     stopSessionWorkers(app, &stats, sessions[0..]);
     _ = app.sys.serviceEndpointUnregister(endpoint_handle);
