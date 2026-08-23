@@ -33,6 +33,7 @@ const rdp_handshake_timeout_ms: u64 = 5000;
 const rdp_remote_frame_wait_ms: u64 = 10000;
 const rdp_session_input_timeout_ms: u64 = 500;
 const rdp_session_input_burst: u32 = 16;
+const rdp_remote_input_backpressure_ms: u64 = 250;
 const rdp_session_loop_sleep_ticks: u64 = 1;
 const rdp_session_idle_sleep_ms: u64 = 15;
 const rdp_session_state_check_ms: u64 = 250;
@@ -396,7 +397,7 @@ const ServiceStats = struct {
     bitmap_raw_bytes: u32 = 0,
     bitmap_rle_rows: u32 = 0,
     bitmap_raw_rows: u32 = 0,
-    // 0.56.38: Shared-Frame-Zeilen (direkt aus dem gemappten Puffer)
+    // Shared-Snapshot-Zeilen (direkt aus dem stabilen Mapping)
     // vs. Kompat-Kopien via remoteFrameRead.
     bitmap_map_rows: u32 = 0,
     bitmap_copy_rows: u32 = 0,
@@ -625,6 +626,8 @@ fn handleRequest(app: *const App, endpoint_handle: u32, stats: *ServiceStats, co
 
 fn replyStatus(app: *const App, endpoint_handle: u32, request_id: u32, stats: *ServiceStats, config: *const Config) i32 {
     stats.status_requests +%= 1;
+    var input_status: r4os.abi.RemoteInputStatus = .{};
+    _ = captureRemoteInputStatus(app, stats, &input_status);
     var out: [r4os.abi.service_api_max_payload]u8 = .{0} ** r4os.abi.service_api_max_payload;
     var pos: usize = 0;
     appendText(out[0..], &pos, "RDPSVC OK port=");
@@ -2450,7 +2453,7 @@ fn runRdpSessionLoop(app: *const App, stream: TcpStream, transport: RdpTransport
                 continue;
             }
         } else if ((now -% last_frame_ticks) >= frame_gap_ticks and sessionFrameRevisionChanged(app, last_rev)) {
-            if (sendBitmapUpdate(app, stream, transport, scratch, stats, &cursor_track)) {
+            if (sendBitmapUpdate(app, stream, transport, scratch, stats, last_rev, &cursor_track)) {
                 last_rev = stats.last_frame_revision;
                 last_frame_ticks = app.sys.ticks();
                 did_work = true;
@@ -3046,8 +3049,15 @@ fn pushMouseInput(app: *const App, stats: *ServiceStats, data: []const u8) bool 
 }
 
 fn pushRemoteInput(app: *const App, stats: *ServiceStats, event: *r4os.abi.RemoteInputEvent) bool {
-    const rc = app.desk.remoteInputPush(event);
-    if (rc <= 0) return inputBool(stats, "input-push");
+    const deadline = app.sys.ticks() + app.sys.ticksFromMilliseconds(rdp_remote_input_backpressure_ms);
+    var rc: i32 = 0;
+    while (true) {
+        rc = app.desk.remoteInputPush(event);
+        if (rc > 0) break;
+        if (rc != r4os.abi.remote_input_error_full) return inputBool(stats, "input-push");
+        if (app.sys.ticks() >= deadline) return inputBool(stats, "input-backpressure");
+        app.sys.sleepTicks(0);
+    }
     stats.input_events +%= 1;
     stats.input_pushes +%= 1;
     stats.last_input_kind = event.kind;
@@ -3066,9 +3076,6 @@ fn pushRemoteInput(app: *const App, stats: *ServiceStats, event: *r4os.abi.Remot
     } else {
         stats.input_mouse +%= 1;
     }
-    var status: r4os.abi.RemoteInputStatus = .{};
-    if (captureRemoteInputStatus(app, stats, &status)) stats.last_input_sequence = status.last_sequence;
-    logRemoteInput(app, stats);
     return true;
 }
 
@@ -3080,24 +3087,6 @@ fn captureRemoteInputStatus(app: *const App, stats: *ServiceStats, status: *r4os
     stats.last_input_polled_total = status.polled;
     stats.last_input_dropped_total = status.dropped;
     return true;
-}
-
-fn logRemoteInput(app: *const App, stats: *const ServiceStats) void {
-    app.sys.write("RDPSVC remote input: kind=");
-    app.sys.printU64(@intCast(stats.last_input_kind));
-    app.sys.write(" seq=");
-    app.sys.printU64(@intCast(stats.last_input_sequence));
-    app.sys.write(" key=");
-    app.sys.printU64(@intCast(stats.last_input_key));
-    app.sys.write(" x=");
-    app.sys.printI32(stats.last_input_x);
-    app.sys.write(" y=");
-    app.sys.printI32(stats.last_input_y);
-    app.sys.write(" wheel=");
-    app.sys.printI32(stats.last_input_wheel);
-    app.sys.write(" buttons=");
-    app.sys.printU64(@intCast(stats.last_input_buttons));
-    app.sys.println("");
 }
 
 fn updateInputModifiers(stats: *ServiceStats, scancode: u16, released: bool) bool {
@@ -3414,8 +3403,8 @@ fn sendBitmapStripe(app: *const App, stream: TcpStream, transport: RdpTransport,
 // Update im laufenden Betrieb: nur die vom Desktop gemeldete geaenderte Region
 // senden (Dirty-Rect). Cursor-/UI-Aenderungen werden so winzig und schnell, und
 // der einmalige Initial-Vollframe wird nicht mehr von Vollframes ueberrannt.
-fn sendBitmapUpdate(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, cursor: ?*CursorTrack) bool {
-    return sendBitmapFrame(app, stream, transport, out, stats, 0, false, true, 0, 0, cursor);
+fn sendBitmapUpdate(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, last_revision: u32, cursor: ?*CursorTrack) bool {
+    return sendBitmapFrame(app, stream, transport, out, stats, last_revision, true, true, 0, 0, cursor);
 }
 
 fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, last_revision: u32, require_new: bool, dirty_only: bool, stripe_y: u32, stripe_h: u32, cursor: ?*CursorTrack) bool {
@@ -3498,17 +3487,22 @@ fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, 
     var rect_body_pos: usize = 0;
     var rect_count: u16 = 0;
 
-    // 0.56.38: Shared-Frame - pro Frame frisch mappen (billiger
-    // Tabellen-Call); bei Erfolg lesen die Zeilen direkt aus dem
-    // Kernel-Puffer (Doppelkopie entfaellt), sonst bleibt
-    // remoteFrameRead der vollstaendige Kompat-Pfad.
+    // Pro Frame wird ein stabiler Kernel-Snapshot gemappt. generation muss
+    // zur zuvor gelesenen Revision passen; bei einem Publish im Zwischenraum
+    // wird vor dem ersten Netzwerk-Write verworfen und neu angesetzt.
     var shared_pixels: ?[*]const u32 = null;
     {
         var map_info: r4os.abi.RemoteFrameMapInfo = .{};
-        if (app.desk.remoteFrameMap(&map_info) == 0 and
-            map_info.pixels_addr != 0 and
-            map_info.capacity_pixels >= @as(u64, info.width) * @as(u64, info.height))
-        {
+        const map_rc = app.desk.remoteFrameMap(&map_info);
+        if (map_rc == 0) {
+            if (map_info.pixels_addr == 0 or
+                map_info.capacity_pixels < @as(u64, info.width) * @as(u64, info.height) or
+                map_info.generation != info.revision)
+            {
+                stats.bitmap_errors +%= 1;
+                setLastError(stats, "frame-snapshot-change");
+                return false;
+            }
             shared_pixels = @ptrFromInt(map_info.pixels_addr);
         }
     }
@@ -3536,7 +3530,7 @@ fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, 
                     setLastError(stats, "frame-read");
                     return false;
                 }
-                if (!validRemoteFrame(&read_info) or read_info.format != info.format or
+                if (!validRemoteFrame(&read_info) or read_info.revision != info.revision or read_info.format != info.format or
                     !frameMatchesSession(app, stream, stats, &read_info))
                 {
                     if (!bitmapFailureIsPermanent(stats)) {
