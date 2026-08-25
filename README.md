@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.2`
+- Version: `0.1.5`
 - Image target: `/R4OS/SERVICES/RDPSVC.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -32,6 +32,12 @@ mapped local checkouts.
 Detailed German technical notes from the migration are preserved in
 `DOCUMENTATION.de.txt`. Source-transfer provenance is recorded in
 `PROVENANCE.txt`.
+
+The productive bitmap path advertises exactly NSCodec, selects it only when
+the negotiated client capabilities and measured wire size justify it, and
+otherwise retains the RLE16/Raw fallback. Stable recurring tiles can be
+published through the negotiated Revision 3 bitmap cache and reused by
+MemBlt after generation validation.
 
 ## License
 

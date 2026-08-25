@@ -7,3 +7,10 @@ Pfad Code/System/Services/RdpService.
 Source, Manifest, Buildscript und Dokumentation wurden in 0.64.18
 unveraendert uebernommen. Neu sind nur Paketpin, Buildstarter, Settings und
 Git-Hygiene.
+
+Die NSCodec-, Fast-Path- und Bitmapcache-V3-Implementierung in 0.69.52 ist
+neuer, originaler R4OS-Code. Fachliche Grundlage sind die veroeffentlichten
+Microsoft-Spezifikationen MS-RDPBCGR, MS-RDPEGDI und MS-RDPNSC. Die im
+Workspace separat vorliegende Apache-2.0-XRDP-Referenz wurde nur zum
+unabhaengigen Wireformat-Gegencheck gelesen; es wurde kein externer
+Codecquelltext kopiert oder eingebunden.

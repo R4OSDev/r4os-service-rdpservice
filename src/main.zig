@@ -1,6 +1,7 @@
 const std = @import("std");
 const r4os = @import("r4os");
 const bitmap_geometry = @import("bitmap_geometry.zig");
+const nscodec = @import("nscodec.zig");
 
 const service_name = "RDPSVC";
 const selftest_arg = "/SELFTEST";
@@ -223,7 +224,7 @@ const rdp_selftest_max_pixels: usize = 512;
 const rle_row_comp_max: usize = rdp_selftest_max_pixels * 3 + 16;
 const rdp_demand_default_width: u16 = 1024;
 const rdp_demand_default_height: u16 = 768;
-const rdp_demand_capability_count: u16 = 10;
+const rdp_demand_capability_count: u16 = 11;
 const rdp_cap_general: u16 = 0x0001;
 const rdp_cap_bitmap: u16 = 0x0002;
 const rdp_cap_order: u16 = 0x0003;
@@ -233,7 +234,32 @@ const rdp_cap_share: u16 = 0x0009;
 const rdp_cap_color_cache: u16 = 0x000A;
 const rdp_cap_input: u16 = 0x000D;
 const rdp_cap_font: u16 = 0x000E;
+const rdp_cap_bitmap_cache_rev2: u16 = 0x0013;
+const rdp_cap_surface_commands: u16 = 0x001C;
 const rdp_cap_bitmap_codecs: u16 = 0x001D;
+const rdp_general_fastpath_output: u16 = 0x0001;
+const rdp_general_no_bitmap_compression_header: u16 = 0x0400;
+const rdp_surface_set_bits: u32 = 0x0000_0002;
+const rdp_order_cache_bitmap_rev3: u16 = 0x0002;
+const rdp_cache_wait_list_flag: u16 = 0x0002;
+const rdp_cache_rev3_do_not_cache: u16 = 0x0800;
+const rdp_cache_waiting_list_index: u16 = 0x7fff;
+const rdp_order_memblt_index: usize = 3;
+const rdp_order_mem3blt_index: usize = 4;
+const rdp_nscodec_guid = [_]u8{ 0xb9, 0x1b, 0x8d, 0xca, 0x0f, 0x00, 0x4f, 0x15, 0x58, 0x9f, 0xae, 0x2d, 0x1a, 0x87, 0xe2, 0xd6 };
+const rdp_nscodec_id: u8 = 1;
+const rdp_fastpath_update_orders: u8 = 0;
+const rdp_fastpath_update_surface_commands: u8 = 4;
+const rdp_surface_command_set_bits: u16 = 0x0001;
+const rdp_order_standard: u8 = 0x01;
+const rdp_order_secondary: u8 = 0x02;
+const rdp_order_type_change: u8 = 0x08;
+const rdp_primary_order_memblt: u8 = 0x0D;
+const rdp_secondary_order_cache_bitmap_rev3: u8 = 0x08;
+const rdp_rop_srccopy: u8 = 0xCC;
+const rdp_cache_bpp_id_32: u16 = 0x0006;
+const rdp_nscodec_tile_rows: usize = nscodec.max_tile_height;
+const rdp_nscodec_selection_overhead: usize = 64;
 const rdp_input_event_sync: u16 = 0x0000;
 const rdp_input_event_scancode: u16 = 0x0004;
 const rdp_input_event_unicode: u16 = 0x0005;
@@ -397,6 +423,32 @@ const ServiceStats = struct {
     bitmap_raw_bytes: u32 = 0,
     bitmap_rle_rows: u32 = 0,
     bitmap_raw_rows: u32 = 0,
+    client_graphics_caps_ok: u32 = 0,
+    client_fastpath_output: u32 = 0,
+    client_surface_set_bits: u32 = 0,
+    client_nscodec: u32 = 0,
+    client_nscodec_id: u32 = 0,
+    client_cache_rev2: u32 = 0,
+    client_cache_wait_list: u32 = 0,
+    client_cache_rev3: u32 = 0,
+    client_memblt: u32 = 0,
+    client_mem3blt: u32 = 0,
+    client_cache_id: u32 = 0,
+    client_cache_entries: u32 = 0,
+    bitmap_nscodec_tiles: u32 = 0,
+    bitmap_nscodec_bytes: u32 = 0,
+    bitmap_nscodec_raw_bytes: u32 = 0,
+    bitmap_nscodec_wire_bytes: u64 = 0,
+    bitmap_nscodec_encode_ticks: u64 = 0,
+    bitmap_codec_fallback_tiles: u32 = 0,
+    bitmap_codec_fallback_errors: u32 = 0,
+    bitmap_surface_publications: u32 = 0,
+    bitmap_cache_publications: u32 = 0,
+    bitmap_cache_waitlist_publications: u32 = 0,
+    bitmap_cache_hits: u32 = 0,
+    bitmap_cache_invalidations: u32 = 0,
+    bitmap_cache_generation_checks: u32 = 0,
+    bitmap_cache_saved_bytes: u64 = 0,
     // Shared-Snapshot-Zeilen (direkt aus dem stabilen Mapping)
     // vs. Kompat-Kopien via remoteFrameRead.
     bitmap_map_rows: u32 = 0,
@@ -844,6 +896,40 @@ fn replyStatus(app: *const App, endpoint_handle: u32, request_id: u32, stats: *S
     appendU64(out[0..], &pos, @intCast(stats.bitmap_bytes));
     appendText(out[0..], &pos, " bitmap_errors=");
     appendU64(out[0..], &pos, @intCast(stats.bitmap_errors));
+    appendText(out[0..], &pos, " gfx_caps=");
+    appendU64(out[0..], &pos, @intCast(stats.client_graphics_caps_ok));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.client_fastpath_output));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.client_surface_set_bits));
+    appendText(out[0..], &pos, "/ns");
+    appendU64(out[0..], &pos, @intCast(stats.client_nscodec_id));
+    appendText(out[0..], &pos, " nsc=");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_nscodec_tiles));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_nscodec_bytes));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_nscodec_raw_bytes));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, stats.bitmap_nscodec_wire_bytes);
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, stats.bitmap_nscodec_encode_ticks);
+    appendText(out[0..], &pos, " codec_fb=");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_codec_fallback_tiles));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_codec_fallback_errors));
+    appendText(out[0..], &pos, " bmpcache=");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_cache_publications));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_cache_waitlist_publications));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_cache_hits));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_cache_invalidations));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, @intCast(stats.bitmap_cache_generation_checks));
+    appendText(out[0..], &pos, "/");
+    appendU64(out[0..], &pos, stats.bitmap_cache_saved_bytes);
     appendText(out[0..], &pos, " frame_rows=map/");
     appendU64(out[0..], &pos, @intCast(stats.bitmap_map_rows));
     appendText(out[0..], &pos, ",copy/");
@@ -1265,6 +1351,29 @@ fn mergeSessionStats(out: *ServiceStats, session: *const ServiceStats) void {
     out.bitmap_raw_bytes +%= session.bitmap_raw_bytes;
     out.bitmap_rle_rows +%= session.bitmap_rle_rows;
     out.bitmap_raw_rows +%= session.bitmap_raw_rows;
+    out.client_graphics_caps_ok +%= session.client_graphics_caps_ok;
+    out.client_fastpath_output +%= session.client_fastpath_output;
+    out.client_surface_set_bits +%= session.client_surface_set_bits;
+    out.client_nscodec +%= session.client_nscodec;
+    out.client_cache_rev2 +%= session.client_cache_rev2;
+    out.client_cache_wait_list +%= session.client_cache_wait_list;
+    out.client_cache_rev3 +%= session.client_cache_rev3;
+    out.client_memblt +%= session.client_memblt;
+    out.client_mem3blt +%= session.client_mem3blt;
+    out.bitmap_nscodec_tiles +%= session.bitmap_nscodec_tiles;
+    out.bitmap_nscodec_bytes +%= session.bitmap_nscodec_bytes;
+    out.bitmap_nscodec_raw_bytes +%= session.bitmap_nscodec_raw_bytes;
+    out.bitmap_nscodec_wire_bytes +%= session.bitmap_nscodec_wire_bytes;
+    out.bitmap_nscodec_encode_ticks +%= session.bitmap_nscodec_encode_ticks;
+    out.bitmap_codec_fallback_tiles +%= session.bitmap_codec_fallback_tiles;
+    out.bitmap_codec_fallback_errors +%= session.bitmap_codec_fallback_errors;
+    out.bitmap_surface_publications +%= session.bitmap_surface_publications;
+    out.bitmap_cache_publications +%= session.bitmap_cache_publications;
+    out.bitmap_cache_waitlist_publications +%= session.bitmap_cache_waitlist_publications;
+    out.bitmap_cache_hits +%= session.bitmap_cache_hits;
+    out.bitmap_cache_invalidations +%= session.bitmap_cache_invalidations;
+    out.bitmap_cache_generation_checks +%= session.bitmap_cache_generation_checks;
+    out.bitmap_cache_saved_bytes +%= session.bitmap_cache_saved_bytes;
     out.bitmap_map_rows +%= session.bitmap_map_rows;
     out.bitmap_copy_rows +%= session.bitmap_copy_rows;
     out.refresh_rect_pdus +%= session.refresh_rect_pdus;
@@ -1292,6 +1401,11 @@ fn mergeSessionStats(out: *ServiceStats, session: *const ServiceStats) void {
     if (session.last_selected_protocol != 0) out.last_selected_protocol = session.last_selected_protocol;
     if (session.last_compat_mask != 0) out.last_compat_mask = session.last_compat_mask;
     if (session.last_channel_id != 0) out.last_channel_id = session.last_channel_id;
+    if (session.client_nscodec_id != 0) out.client_nscodec_id = session.client_nscodec_id;
+    if (session.client_cache_entries != 0) {
+        out.client_cache_id = session.client_cache_id;
+        out.client_cache_entries = session.client_cache_entries;
+    }
     if (session.last_client_width != 0) out.last_client_width = session.last_client_width;
     if (session.last_client_height != 0) out.last_client_height = session.last_client_height;
     if (session.session_width != 0) out.session_width = session.session_width;
@@ -2387,6 +2501,10 @@ fn runRdpSessionLoop(app: *const App, stream: TcpStream, transport: RdpTransport
     var paint_active = true;
     var input_repaint_done = false;
     var cursor_track: CursorTrack = .{};
+    var bitmap_cache = nscodec.TileCache.initWithWaitList(
+        if (clientBitmapCacheReady(stats)) stats.client_cache_entries else 0,
+        stats.client_cache_wait_list != 0,
+    );
     const frame_gap_ticks = app.sys.ticksFromMilliseconds(rdp_session_frame_min_gap_ms);
     const state_check_gap = app.sys.ticksFromMilliseconds(rdp_session_state_check_ms);
     const idle_sleep_ticks = app.sys.ticksFromMilliseconds(rdp_session_idle_sleep_ms);
@@ -2443,7 +2561,7 @@ fn runRdpSessionLoop(app: *const App, stream: TcpStream, transport: RdpTransport
         if (paint_active) {
             // Naechsten Streifen des Initial-/Repaint-Schirms senden. Klein
             // genug, dass Input/TCP zwischen den Streifen zum Zug kommen.
-            if (sendBitmapStripe(app, stream, transport, scratch, stats, paint_y, rdp_session_stripe_rows)) {
+            if (sendBitmapStripe(app, stream, transport, scratch, stats, &bitmap_cache, paint_y, rdp_session_stripe_rows)) {
                 paint_y += rdp_session_stripe_rows;
                 last_rev = stats.last_frame_revision;
                 last_frame_ticks = app.sys.ticks();
@@ -2468,7 +2586,7 @@ fn runRdpSessionLoop(app: *const App, stream: TcpStream, transport: RdpTransport
                 continue;
             }
         } else if ((now -% last_frame_ticks) >= frame_gap_ticks and sessionFrameRevisionChanged(app, last_rev)) {
-            if (sendBitmapUpdate(app, stream, transport, scratch, stats, last_rev, &cursor_track)) {
+            if (sendBitmapUpdate(app, stream, transport, scratch, stats, &bitmap_cache, last_rev, &cursor_track)) {
                 last_rev = stats.last_frame_revision;
                 last_frame_ticks = app.sys.ticks();
                 did_work = true;
@@ -2608,6 +2726,7 @@ fn runRdpConnectionFinalization(app: *const App, stream: TcpStream, transport: R
     const confirm_len = readRdpPacket(app, stream, transport, scratch, 8, stats, "confirm-active") orelse return false;
     if (classifyActivationPdu(scratch[0..confirm_len]) != .confirm_active) return protocolBool(stats, "confirm-active-type");
     if (!parseShareControlPdu(scratch[0..confirm_len], rdp_pdu_confirm_active, stats, "confirm-active")) return false;
+    if (!parseConfirmGraphicsCapabilities(scratch[0..confirm_len], stats)) return false;
     stats.confirm_active +%= 1;
     traceActivationStage(app, stream, stats, "confirm-active");
 
@@ -2910,6 +3029,122 @@ fn parseShareControlPdu(packet: []const u8, expected: u16, stats: *ServiceStats,
     const pdu_type = readLe16(payload[2..4]) & 0x0F_FF;
     if (pdu_type != expected) return protocolBool(stats, label);
     return true;
+}
+
+fn parseConfirmGraphicsCapabilities(packet: []const u8, stats: *ServiceStats) bool {
+    const payload = mcsUserDataView(packet) orelse return protocolBool(stats, "confirm-caps-mcs");
+    if (payload.len < 20) return protocolBool(stats, "confirm-caps-short");
+    const source_length: usize = @intCast(readLe16(payload[12..14]));
+    const combined_length: usize = @intCast(readLe16(payload[14..16]));
+    if (combined_length < 4 or source_length > payload.len - 16) return protocolBool(stats, "confirm-caps-length");
+    const combined_start = 16 + source_length;
+    if (combined_start > payload.len or combined_length > payload.len - combined_start) return protocolBool(stats, "confirm-caps-boundary");
+    const combined_end = combined_start + combined_length;
+    if (combined_start + 4 > combined_end) return protocolBool(stats, "confirm-caps-header");
+    const capability_count = readLe16(payload[combined_start .. combined_start + 2]);
+    return parseGraphicsCapabilitySets(payload[combined_start + 4 .. combined_end], capability_count, stats);
+}
+
+fn parseGraphicsCapabilitySets(capabilities: []const u8, capability_count: u16, stats: *ServiceStats) bool {
+    var pos: usize = 0;
+    var index: u16 = 0;
+    while (index < capability_count) : (index += 1) {
+        if (pos + 4 > capabilities.len) return protocolBool(stats, "confirm-cap-header");
+        const capability_type = readLe16(capabilities[pos .. pos + 2]);
+        const capability_length: usize = @intCast(readLe16(capabilities[pos + 2 .. pos + 4]));
+        if (capability_length < 4 or capability_length > capabilities.len - pos) return protocolBool(stats, "confirm-cap-length");
+        const capability = capabilities[pos .. pos + capability_length];
+        switch (capability_type) {
+            rdp_cap_general => {
+                if (capability.len < 24) return protocolBool(stats, "confirm-general-cap");
+                const extra_flags = readLe16(capability[14..16]);
+                if ((extra_flags & rdp_general_fastpath_output) != 0) stats.client_fastpath_output = 1;
+            },
+            rdp_cap_order => {
+                if (capability.len < 88) return protocolBool(stats, "confirm-order-cap");
+                if (capability[36 + rdp_order_memblt_index] != 0) stats.client_memblt = 1;
+                if (capability[36 + rdp_order_mem3blt_index] != 0) stats.client_mem3blt = 1;
+                if ((readLe16(capability[70..72]) & rdp_order_cache_bitmap_rev3) != 0) stats.client_cache_rev3 = 1;
+            },
+            rdp_cap_bitmap_cache_rev2 => {
+                if (!parseClientBitmapCacheRev2(capability, stats)) return protocolBool(stats, "confirm-cache-cap");
+            },
+            rdp_cap_surface_commands => {
+                if (capability.len < 12) return protocolBool(stats, "confirm-surface-cap");
+                if ((readLe32(capability[4..8]) & rdp_surface_set_bits) != 0) stats.client_surface_set_bits = 1;
+            },
+            rdp_cap_bitmap_codecs => {
+                if (!parseClientBitmapCodecs(capability, stats)) return protocolBool(stats, "confirm-codec-cap");
+            },
+            else => {},
+        }
+        pos += capability_length;
+    }
+    if (pos > capabilities.len) return protocolBool(stats, "confirm-caps-overrun");
+    stats.client_graphics_caps_ok = 1;
+    return true;
+}
+
+fn parseClientBitmapCacheRev2(capability: []const u8, stats: *ServiceStats) bool {
+    if (capability.len < 40) return false;
+    if ((readLe16(capability[4..6]) & rdp_cache_wait_list_flag) != 0) stats.client_cache_wait_list = 1;
+    const cache_count = @min(@as(usize, capability[7]), 5);
+    var selected_id: u32 = 0;
+    var selected_entries: u32 = 0;
+    var cache_id: usize = 0;
+    while (cache_id < cache_count) : (cache_id += 1) {
+        const cell_offset = 8 + cache_id * 4;
+        const entries = readLe32(capability[cell_offset .. cell_offset + 4]) & 0x7fff_ffff;
+        if (entries != 0) {
+            selected_id = @intCast(cache_id);
+            selected_entries = @min(entries, @as(u32, nscodec.max_cache_entries));
+        }
+    }
+    stats.client_cache_rev2 = 1;
+    stats.client_cache_id = selected_id;
+    stats.client_cache_entries = selected_entries;
+    return true;
+}
+
+fn parseClientBitmapCodecs(capability: []const u8, stats: *ServiceStats) bool {
+    if (capability.len < 5) return false;
+    const codec_count = capability[4];
+    var pos: usize = 5;
+    var index: u8 = 0;
+    while (index < codec_count) : (index += 1) {
+        if (pos + 19 > capability.len) return false;
+        const properties_length: usize = @intCast(readLe16(capability[pos + 17 .. pos + 19]));
+        if (properties_length > capability.len - (pos + 19)) return false;
+        const properties = capability[pos + 19 .. pos + 19 + properties_length];
+        if (bytesEq(capability[pos .. pos + 16], rdp_nscodec_guid[0..])) {
+            if (capability[pos + 16] == rdp_nscodec_id and properties.len >= 3 and
+                properties[0] <= 1 and properties[1] <= 1 and
+                properties[2] >= nscodec.color_loss_level and properties[2] <= 7)
+            {
+                stats.client_nscodec = 1;
+                stats.client_nscodec_id = rdp_nscodec_id;
+            }
+        }
+        pos += 19 + properties_length;
+    }
+    return pos == capability.len;
+}
+
+fn clientNscodecReady(stats: *const ServiceStats) bool {
+    return stats.client_graphics_caps_ok != 0 and
+        stats.client_fastpath_output != 0 and
+        stats.client_surface_set_bits != 0 and
+        stats.client_nscodec != 0 and
+        stats.client_nscodec_id == rdp_nscodec_id;
+}
+
+fn clientBitmapCacheReady(stats: *const ServiceStats) bool {
+    return clientNscodecReady(stats) and
+        stats.client_cache_rev2 != 0 and
+        stats.client_cache_rev3 != 0 and
+        stats.client_memblt != 0 and
+        stats.client_mem3blt != 0 and
+        stats.client_cache_entries != 0;
 }
 
 fn parseShareDataPdu(packet: []const u8, expected: u8, stats: *ServiceStats, label: []const u8) bool {
@@ -3242,6 +3477,7 @@ fn buildDemandActive(out: []u8, client_width: u32, client_height: u32) ?usize {
     if (!writeDemandActiveBitmapCapability(pdu[0..], &p, normalizeRdpDimension(client_width, rdp_demand_default_width), normalizeRdpDimension(client_height, rdp_demand_default_height))) return null;
     if (!writeDemandActiveFontCapability(pdu[0..], &p)) return null;
     if (!writeDemandActiveOrderCapability(pdu[0..], &p)) return null;
+    if (!writeDemandActiveSurfaceCommandsCapability(pdu[0..], &p)) return null;
     if (!writeDemandActiveBitmapCodecsCapability(pdu[0..], &p)) return null;
     if (!writeDemandActiveColorCacheCapability(pdu[0..], &p)) return null;
     if (!writeDemandActivePointerCapability(pdu[0..], &p)) return null;
@@ -3272,7 +3508,7 @@ fn writeDemandActiveGeneralCapability(out: []u8, p: *usize) bool {
         putLe16(out, p, 0x0200) and
         putLe16(out, p, 0) and
         putLe16(out, p, 0) and
-        putLe16(out, p, 0x0400) and
+        putLe16(out, p, rdp_general_fastpath_output | rdp_general_no_bitmap_compression_header) and
         putLe16(out, p, 0) and
         putLe16(out, p, 0) and
         putLe16(out, p, 0) and
@@ -3281,7 +3517,10 @@ fn writeDemandActiveGeneralCapability(out: []u8, p: *usize) bool {
 }
 
 fn sessionBitsPerPixel() u16 {
-    return if (g_compress_rle16) rdp_bitmap_bits_per_pixel_rle else rdp_bitmap_bits_per_pixel;
+    // NSCodec is specified only for 32-bpp RDP sessions. Individual
+    // fallback bitmap rectangles still carry their truthful 16- or 32-bpp
+    // depth in TS_BITMAP_DATA.
+    return rdp_bitmap_bits_per_pixel;
 }
 
 fn writeDemandActiveBitmapCapability(out: []u8, p: *usize, width: u16, height: u16) bool {
@@ -3361,21 +3600,23 @@ fn writeDemandActiveFontCapability(out: []u8, p: *usize) bool {
     return writeCapabilityHeader(out, p, rdp_cap_font, 4);
 }
 
+fn writeDemandActiveSurfaceCommandsCapability(out: []u8, p: *usize) bool {
+    return writeCapabilityHeader(out, p, rdp_cap_surface_commands, 12) and
+        putLe32(out, p, rdp_surface_set_bits) and
+        putLe32(out, p, 0);
+}
+
 fn writeDemandActiveBitmapCodecsCapability(out: []u8, p: *usize) bool {
-    const nscodec_guid = [_]u8{ 0xb9, 0x1b, 0x8d, 0xca, 0x0f, 0x00, 0x4f, 0x15, 0x58, 0x9f, 0xae, 0x2d, 0x1a, 0x87, 0xe2, 0xd6 };
-    const jpeg_guid = [_]u8{ 0xe6, 0x4c, 0xaf, 0x1b, 0xed, 0x9e, 0x0c, 0x43, 0x86, 0x9a, 0xcb, 0x8b, 0x37, 0xb6, 0x62, 0x37 };
-    return writeCapabilityHeader(out, p, rdp_cap_bitmap_codecs, 47) and
-        putByte(out, p, 2) and
-        putBytes(out, p, nscodec_guid[0..]) and
+    // Exactly one advertised codec, exactly one productive encoder. JPEG
+    // used to be announced here despite having no send path.
+    return writeCapabilityHeader(out, p, rdp_cap_bitmap_codecs, 27) and
         putByte(out, p, 1) and
+        putBytes(out, p, rdp_nscodec_guid[0..]) and
+        putByte(out, p, rdp_nscodec_id) and
         putLe16(out, p, 3) and
-        putByte(out, p, 1) and
-        putByte(out, p, 1) and
-        putByte(out, p, 3) and
-        putBytes(out, p, jpeg_guid[0..]) and
         putByte(out, p, 0) and
-        putLe16(out, p, 1) and
-        putByte(out, p, 75);
+        putByte(out, p, 0) and
+        putByte(out, p, nscodec.color_loss_level);
 }
 
 fn writeDemandActiveBitmapCacheRev3CodecIdCapability(out: []u8, p: *usize) bool {
@@ -3402,8 +3643,8 @@ fn buildShareDataPdu(out: []u8, pdu_type2: u8, body: []const u8) ?usize {
     return buildMcsSendDataIndication(out, rdp_io_channel, pdu[0..p]);
 }
 
-fn sendInitialBitmap(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats) bool {
-    return sendBitmapFrame(app, stream, transport, out, stats, 0, false, false, 0, 0, null);
+fn sendInitialBitmap(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, bitmap_cache: *nscodec.TileCache) bool {
+    return sendBitmapFrame(app, stream, transport, out, stats, bitmap_cache, 0, false, false, 0, 0, null);
 }
 
 // 0.56.35: Ein horizontaler Streifen des Vollbilds (rows y..y+h). Der
@@ -3411,18 +3652,18 @@ fn sendInitialBitmap(app: *const App, stream: TcpStream, transport: RdpTransport
 // gemalt statt in EINEM blockierenden 225-PDU-Aufruf - sonst blockiert der
 // Send die ganze Session (kein Input, input_pdus=0) und mstsc trennt beim
 // langsamen TCG-TLS-Dekodieren nach ~11-30% (bmp=0/416..944, frames=0).
-fn sendBitmapStripe(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, stripe_y: u32, stripe_h: u32) bool {
-    return sendBitmapFrame(app, stream, transport, out, stats, 0, false, false, stripe_y, stripe_h, null);
+fn sendBitmapStripe(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, bitmap_cache: *nscodec.TileCache, stripe_y: u32, stripe_h: u32) bool {
+    return sendBitmapFrame(app, stream, transport, out, stats, bitmap_cache, 0, false, false, stripe_y, stripe_h, null);
 }
 
 // Update im laufenden Betrieb: nur die vom Desktop gemeldete geaenderte Region
 // senden (Dirty-Rect). Cursor-/UI-Aenderungen werden so winzig und schnell, und
 // der einmalige Initial-Vollframe wird nicht mehr von Vollframes ueberrannt.
-fn sendBitmapUpdate(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, last_revision: u32, cursor: ?*CursorTrack) bool {
-    return sendBitmapFrame(app, stream, transport, out, stats, last_revision, true, true, 0, 0, cursor);
+fn sendBitmapUpdate(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, bitmap_cache: *nscodec.TileCache, last_revision: u32, cursor: ?*CursorTrack) bool {
+    return sendBitmapFrame(app, stream, transport, out, stats, bitmap_cache, last_revision, true, true, 0, 0, cursor);
 }
 
-fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, last_revision: u32, require_new: bool, dirty_only: bool, stripe_y: u32, stripe_h: u32, cursor: ?*CursorTrack) bool {
+fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, out: []u8, stats: *ServiceStats, bitmap_cache: *nscodec.TileCache, last_revision: u32, require_new: bool, dirty_only: bool, stripe_y: u32, stripe_h: u32, cursor: ?*CursorTrack) bool {
     if (!app.desk.supportsRemoteFrame()) {
         stats.bitmap_errors +%= 1;
         setLastError(stats, "frame-api");
@@ -3520,6 +3761,11 @@ fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, 
             }
             shared_pixels = @ptrFromInt(map_info.pixels_addr);
         }
+    }
+
+    if (clientNscodecReady(stats)) {
+        const adaptive_metrics = sendAdaptiveNscodecRect(app, stream, transport, out, stats, bitmap_cache, &info, rect, shared_pixels) orelse return false;
+        return finishBitmapFrame(app, stats, &info, geometry, rect, adaptive_metrics, cursor);
     }
 
     var y: u32 = rect.y;
@@ -3632,6 +3878,452 @@ fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, 
     if (!flushBitmapRectBody(app, stream, transport, out, stats, &send_state, rect_body[0..rect_body_pos], rect_count)) return false;
     if (!flushBitmapSend(app, stream, stats, &send_state, "bitmap-ack-final")) return false;
 
+    return finishBitmapFrame(app, stats, &info, geometry, rect, metrics, cursor);
+}
+
+// Produktiver NSCodec-Pfad: Ein Dirty-Rechteck wird in kleine, begrenzte
+// Kacheln zerlegt. Nur Inhalte mit einem belegten Wirevorteil gehen als
+// NSCodec ueber Fast-Path Set Surface Bits beziehungsweise Cache Bitmap V3.
+// Alles andere bleibt auf dem bewaehrten RLE16-/Raw-Pfad. Der Cache wird
+// erst nach erfolgreicher Publikation gebunden und vor jedem Hit gegen die
+// Pixel der aktuellen RemoteFrame-Generation geprueft.
+fn sendAdaptiveNscodecRect(
+    app: *const App,
+    stream: TcpStream,
+    transport: RdpTransport,
+    out: []u8,
+    stats: *ServiceStats,
+    bitmap_cache: *nscodec.TileCache,
+    info: *const r4os.abi.RemoteFrameInfo,
+    rect: bitmap_geometry.Rect,
+    shared_pixels: ?[*]const u32,
+) ?bitmap_geometry.ContentMetrics {
+    var tile_pixels: [nscodec.max_tile_pixels]u32 = undefined;
+    var codec_workspace: nscodec.Workspace = .{};
+    var codec_buffer: [nscodec.max_stream_bytes]u8 = undefined;
+    var row565: [nscodec.max_tile_width]u16 = undefined;
+    var rle_buffer: [rle_tile_comp_max]u8 = undefined;
+    var read_info: r4os.abi.RemoteFrameInfo = .{};
+    var send_state: BitmapSendState = .{};
+    var metrics: bitmap_geometry.ContentMetrics = .{};
+
+    var tile_y = rect.y;
+    while (tile_y < rect.y + rect.height) {
+        const tile_height = @min(@as(u32, @intCast(rdp_nscodec_tile_rows)), rect.y + rect.height - tile_y);
+        const th: usize = @intCast(tile_height);
+        var tile_x = rect.x;
+        while (tile_x < rect.x + rect.width) {
+            const tile_width = @min(@as(u32, @intCast(nscodec.max_tile_width)), rect.x + rect.width - tile_x);
+            const tw: usize = @intCast(tile_width);
+            const pixel_count = tw * th;
+
+            var local_y: usize = 0;
+            while (local_y < th) : (local_y += 1) {
+                const source_y = tile_y + @as(u32, @intCast(local_y));
+                const offset_u64 = @as(u64, info.width) * @as(u64, source_y) + @as(u64, tile_x);
+                if (offset_u64 > 0xffff_ffff) {
+                    stats.bitmap_errors +%= 1;
+                    setLastError(stats, "frame-offset");
+                    return null;
+                }
+                const target = tile_pixels[local_y * tw .. (local_y + 1) * tw];
+                if (shared_pixels) |source| {
+                    const offset: usize = @intCast(offset_u64);
+                    @memcpy(target, source[offset .. offset + tw]);
+                } else {
+                    const got = app.desk.remoteFrameRead(@intCast(offset_u64), target, &read_info);
+                    if (got != @as(i32, @intCast(tw))) {
+                        stats.bitmap_errors +%= 1;
+                        setLastError(stats, "frame-read");
+                        return null;
+                    }
+                    if (!validRemoteFrame(&read_info) or read_info.revision != info.revision or
+                        read_info.format != info.format or !frameMatchesSession(app, stream, stats, &read_info))
+                    {
+                        if (!bitmapFailureIsPermanent(stats)) {
+                            stats.bitmap_errors +%= 1;
+                            setLastError(stats, "frame-snapshot-change");
+                        }
+                        return null;
+                    }
+                }
+                metrics = bitmap_geometry.updateContentMetrics(metrics, target, @intCast(offset_u64));
+            }
+
+            const pixels = tile_pixels[0..pixel_count];
+            const fingerprint = nscodec.fingerprintXrgb32(pixels, tw, th) orelse {
+                stats.bitmap_errors +%= 1;
+                setLastError(stats, "nscodec-fingerprint");
+                return null;
+            };
+
+            var cache_decision: ?nscodec.CacheDecision = null;
+            if (clientBitmapCacheReady(stats)) {
+                cache_decision = bitmap_cache.decide(tile_x, tile_y, tile_width, tile_height, info.revision, fingerprint);
+                if (cache_decision) |decision| {
+                    stats.bitmap_cache_generation_checks +%= 1;
+                    if (decision.invalidates) {
+                        // Eine veraenderte Kachel darf auch dann nicht mehr als
+                        // Treffer gelten, wenn der folgende Encode fallbackt.
+                        bitmap_cache.entries[decision.slot].valid = false;
+                        bitmap_cache.entries[decision.slot].waiting = false;
+                        stats.bitmap_cache_invalidations +%= 1;
+                    }
+                    if (decision.hit) {
+                        const packet_len = buildFastPathMemBltPdu(
+                            out,
+                            @intCast(stats.client_cache_id),
+                            @intCast(decision.slot),
+                            tile_x,
+                            tile_y,
+                            tile_width,
+                            tile_height,
+                        ) orelse {
+                            stats.bitmap_errors +%= 1;
+                            setLastError(stats, "bitmap-cache-hit-build");
+                            return null;
+                        };
+                        if (!sendBitmapChunk(app, stream, transport, out[0..packet_len], stats, &send_state)) return null;
+                        const uncached_wire_bytes = bitmap_cache.entries[decision.slot].uncached_wire_bytes;
+                        _ = bitmap_cache.commit(
+                            decision,
+                            tile_x,
+                            tile_y,
+                            tile_width,
+                            tile_height,
+                            info.revision,
+                            fingerprint,
+                            uncached_wire_bytes,
+                        );
+                        if (uncached_wire_bytes > packet_len) {
+                            stats.bitmap_cache_saved_bytes +%= uncached_wire_bytes - packet_len;
+                        }
+                        stats.bitmap_cache_hits +%= 1;
+                        stats.bitmap_nscodec_wire_bytes +%= packet_len;
+                        accountAdaptiveTile(stats, tile_width, tile_height);
+                        tile_x += tile_width;
+                        continue;
+                    }
+                }
+            }
+
+            const encode_start = app.sys.ticks();
+            const encoded = nscodec.encodeXrgb32(pixels, tw, th, &codec_workspace, codec_buffer[0..]);
+            stats.bitmap_nscodec_encode_ticks +%= app.sys.ticks() -% encode_start;
+            if (encoded) |result| {
+                if (nscodec.savesWireBytes(result.bytes, tw, th, rdp_nscodec_selection_overhead)) {
+                    const encoded_stream = codec_buffer[0..result.bytes];
+                    var packet_len: usize = 0;
+                    var cache_published = false;
+                    if (cache_decision) |decision| {
+                        packet_len = buildFastPathCacheNscodecAndMemBltPdu(
+                            out,
+                            @intCast(stats.client_cache_id),
+                            @intCast(decision.slot),
+                            tile_x,
+                            tile_y,
+                            tile_width,
+                            tile_height,
+                            stats.client_nscodec_id,
+                            fingerprint,
+                            decision.wait_list,
+                            encoded_stream,
+                        ) orelse 0;
+                        cache_published = packet_len != 0;
+                    }
+                    if (packet_len == 0) {
+                        packet_len = buildFastPathSurfaceNscodecPdu(
+                            out,
+                            tile_x,
+                            tile_y,
+                            tile_width,
+                            tile_height,
+                            stats.client_nscodec_id,
+                            encoded_stream,
+                        ) orelse 0;
+                    }
+                    if (packet_len != 0) {
+                        if (!sendBitmapChunk(app, stream, transport, out[0..packet_len], stats, &send_state)) return null;
+                        if (cache_published) {
+                            const decision = cache_decision.?;
+                            const uncached_wire_bytes = fastPathSurfaceNscodecLength(result.bytes) orelse packet_len;
+                            _ = bitmap_cache.commit(
+                                decision,
+                                tile_x,
+                                tile_y,
+                                tile_width,
+                                tile_height,
+                                info.revision,
+                                fingerprint,
+                                uncached_wire_bytes,
+                            );
+                            if (decision.wait_list) {
+                                stats.bitmap_cache_waitlist_publications +%= 1;
+                            } else {
+                                stats.bitmap_cache_publications +%= 1;
+                            }
+                        } else {
+                            stats.bitmap_surface_publications +%= 1;
+                        }
+                        stats.bitmap_nscodec_tiles +%= 1;
+                        stats.bitmap_nscodec_bytes +%= @intCast(result.bytes);
+                        stats.bitmap_nscodec_raw_bytes +%= @intCast(pixel_count * @sizeOf(u32));
+                        stats.bitmap_nscodec_wire_bytes +%= packet_len;
+                        stats.bitmap_comp_bytes +%= @intCast(result.bytes);
+                        stats.bitmap_bytes +%= @intCast(result.bytes);
+                        accountAdaptiveTile(stats, tile_width, tile_height);
+                        tile_x += tile_width;
+                        continue;
+                    }
+                    stats.bitmap_codec_fallback_errors +%= 1;
+                } else {
+                    stats.bitmap_codec_fallback_tiles +%= 1;
+                }
+            } else {
+                stats.bitmap_codec_fallback_errors +%= 1;
+            }
+
+            if (!sendAdaptiveLegacyTile(
+                app,
+                stream,
+                transport,
+                out,
+                stats,
+                &send_state,
+                tile_x,
+                tile_y,
+                tile_width,
+                tile_height,
+                pixels,
+                codec_buffer[0..],
+                row565[0..],
+                rle_buffer[0..],
+            )) return null;
+            tile_x += tile_width;
+        }
+        if (shared_pixels != null) stats.bitmap_map_rows +%= tile_height else stats.bitmap_copy_rows +%= tile_height;
+        tile_y += tile_height;
+    }
+    if (!flushBitmapSend(app, stream, stats, &send_state, "bitmap-ack-final")) return null;
+    return metrics;
+}
+
+fn accountAdaptiveTile(stats: *ServiceStats, width: u32, height: u32) void {
+    stats.bitmap_updates +%= 1;
+    stats.bitmap_rectangles +%= 1;
+    stats.bitmap_pixels +%= width *% height;
+}
+
+fn sendAdaptiveLegacyTile(
+    app: *const App,
+    stream: TcpStream,
+    transport: RdpTransport,
+    out: []u8,
+    stats: *ServiceStats,
+    send_state: *BitmapSendState,
+    dest_x: u32,
+    dest_y: u32,
+    width: u32,
+    height: u32,
+    pixels: []const u32,
+    body: []u8,
+    row565: []u16,
+    comp: []u8,
+) bool {
+    const tw: usize = @intCast(width);
+    const th: usize = @intCast(height);
+    if (pixels.len != tw * th) return false;
+    if (!g_compress_rle16) {
+        var row_index: usize = 0;
+        while (row_index < th) : (row_index += 1) {
+            const row = pixels[row_index * tw .. (row_index + 1) * tw];
+            const packet_len = buildBitmapUpdatePdu(out, dest_x, dest_y + @as(u32, @intCast(row_index)), width, 1, row) orelse {
+                stats.bitmap_errors +%= 1;
+                setLastError(stats, "bitmap-build");
+                return false;
+            };
+            if (!sendBitmapChunk(app, stream, transport, out[0..packet_len], stats, send_state)) return false;
+            stats.bitmap_raw_bytes +%= @intCast(row.len * @sizeOf(u32));
+            stats.bitmap_raw_rows +%= 1;
+            stats.bitmap_bytes +%= @intCast(row.len * @sizeOf(u32));
+            accountAdaptiveTile(stats, width, 1);
+        }
+        return true;
+    }
+
+    var body_pos: usize = 0;
+    var rect_count: u16 = 0;
+    var row_index: usize = 0;
+    while (row_index < th) : (row_index += 1) {
+        const row = pixels[row_index * tw .. (row_index + 1) * tw];
+        var row_x: u32 = 0;
+        while (row_x < width) {
+            const plan = bitmap_geometry.nextTile(width - row_x, true) orelse return false;
+            const slice_start: usize = @intCast(row_x);
+            const slice_width: usize = @intCast(plan.width);
+            const source = row[slice_start .. slice_start + slice_width];
+            var encoded_len: usize = 0;
+            switch (plan.encoding) {
+                .rle16 => {
+                    for (source, 0..) |pixel, index| row565[index] = rgb565FromXrgb(pixel);
+                    encoded_len = rleEncodeRow16(row565[0..slice_width], comp) orelse {
+                        stats.bitmap_errors +%= 1;
+                        setLastError(stats, "rle-encode");
+                        return false;
+                    };
+                },
+                .raw16 => encoded_len = raw16PaddedBytes(plan.width) orelse {
+                    stats.bitmap_errors +%= 1;
+                    setLastError(stats, "raw16-size");
+                    return false;
+                },
+                .raw32 => unreachable,
+            }
+            if (body_pos + 18 + encoded_len > body.len or rect_count >= rdp_bitmap_body_max_rects) {
+                if (!flushBitmapRectBody(app, stream, transport, out, stats, send_state, body[0..body_pos], rect_count)) return false;
+                body_pos = 0;
+                rect_count = 0;
+            }
+            switch (plan.encoding) {
+                .rle16 => {
+                    if (!appendBitmapRectRle16(body, &body_pos, dest_x + row_x, dest_y + @as(u32, @intCast(row_index)), plan.width, comp[0..encoded_len])) return false;
+                    stats.bitmap_comp_bytes +%= @intCast(encoded_len);
+                    stats.bitmap_raw_bytes +%= @intCast(slice_width * @sizeOf(u16));
+                    stats.bitmap_rle_rows +%= 1;
+                },
+                .raw16 => {
+                    if (!appendBitmapRectRaw16(body, &body_pos, dest_x + row_x, dest_y + @as(u32, @intCast(row_index)), source)) return false;
+                    stats.bitmap_raw_bytes +%= @intCast(encoded_len);
+                    stats.bitmap_raw_rows +%= 1;
+                },
+                .raw32 => unreachable,
+            }
+            stats.bitmap_bytes +%= @intCast(encoded_len);
+            rect_count += 1;
+            accountAdaptiveTile(stats, plan.width, 1);
+            row_x += plan.width;
+        }
+    }
+    return flushBitmapRectBody(app, stream, transport, out, stats, send_state, body[0..body_pos], rect_count);
+}
+
+fn fastPathPacketLength(update_data_len: usize) ?usize {
+    if (update_data_len > 0xffff) return null;
+    const update_len = 3 + update_data_len;
+    const short_total = 2 + update_len;
+    const total = if (short_total <= 0x7f) short_total else 3 + update_len;
+    if (total > 0x7fff) return null;
+    return total;
+}
+
+fn fastPathSurfaceNscodecLength(encoded_len: usize) ?usize {
+    if (encoded_len > std.math.maxInt(usize) - 22) return null;
+    return fastPathPacketLength(22 + encoded_len);
+}
+
+fn beginFastPathUpdate(out: []u8, pos: *usize, update_code: u8, update_data_len: usize) ?usize {
+    if (update_code > 0x0f) return null;
+    const total = fastPathPacketLength(update_data_len) orelse return null;
+    if (out.len < total) return null;
+    if (!putByte(out, pos, 0)) return null;
+    if (total <= 0x7f) {
+        if (!putByte(out, pos, @intCast(total))) return null;
+    } else {
+        if (!putByte(out, pos, 0x80 | @as(u8, @intCast((total >> 8) & 0x7f))) or
+            !putByte(out, pos, @intCast(total & 0xff))) return null;
+    }
+    if (!putByte(out, pos, update_code) or !putLe16(out, pos, @intCast(update_data_len))) return null;
+    return total;
+}
+
+fn appendExtendedBitmapData(out: []u8, pos: *usize, width: u32, height: u32, codec_id: u32, encoded: []const u8) bool {
+    if (width == 0 or height == 0 or width > 0xffff or height > 0xffff or codec_id > 0xff or encoded.len > 0xffff_ffff) return false;
+    return putByte(out, pos, 32) and
+        putByte(out, pos, 0) and
+        putByte(out, pos, 0) and
+        putByte(out, pos, @intCast(codec_id)) and
+        putLe16(out, pos, @intCast(width)) and
+        putLe16(out, pos, @intCast(height)) and
+        putLe32(out, pos, @intCast(encoded.len)) and
+        putBytes(out, pos, encoded);
+}
+
+fn buildFastPathSurfaceNscodecPdu(out: []u8, x: u32, y: u32, width: u32, height: u32, codec_id: u32, encoded: []const u8) ?usize {
+    if (x > 0xffff or y > 0xffff or width == 0 or height == 0) return null;
+    const right = x + width;
+    const bottom = y + height;
+    if (right > 0xffff or bottom > 0xffff or encoded.len > std.math.maxInt(usize) - 22) return null;
+    const update_data_len = 22 + encoded.len;
+    var pos: usize = 0;
+    const total = beginFastPathUpdate(out, &pos, rdp_fastpath_update_surface_commands, update_data_len) orelse return null;
+    if (!putLe16(out, &pos, rdp_surface_command_set_bits) or
+        !putLe16(out, &pos, @intCast(x)) or
+        !putLe16(out, &pos, @intCast(y)) or
+        !putLe16(out, &pos, @intCast(right)) or
+        !putLe16(out, &pos, @intCast(bottom)) or
+        !appendExtendedBitmapData(out, &pos, width, height, codec_id, encoded)) return null;
+    return if (pos == total) total else null;
+}
+
+fn appendMemBltOrder(out: []u8, pos: *usize, cache_id: u8, cache_index: u16, x: u32, y: u32, width: u32, height: u32) bool {
+    if (cache_id > 4 or x > 0xffff or y > 0xffff or width == 0 or height == 0 or width > 0xffff or height > 0xffff) return false;
+    return putByte(out, pos, rdp_order_standard | rdp_order_type_change) and
+        putByte(out, pos, rdp_primary_order_memblt) and
+        putLe16(out, pos, 0x01ff) and
+        putLe16(out, pos, cache_id) and
+        putLe16(out, pos, @intCast(x)) and
+        putLe16(out, pos, @intCast(y)) and
+        putLe16(out, pos, @intCast(width)) and
+        putLe16(out, pos, @intCast(height)) and
+        putByte(out, pos, rdp_rop_srccopy) and
+        putLe16(out, pos, 0) and
+        putLe16(out, pos, 0) and
+        putLe16(out, pos, cache_index);
+}
+
+fn buildFastPathMemBltPdu(out: []u8, cache_id: u8, cache_index: u16, x: u32, y: u32, width: u32, height: u32) ?usize {
+    const update_data_len: usize = 2 + 21;
+    var pos: usize = 0;
+    const total = beginFastPathUpdate(out, &pos, rdp_fastpath_update_orders, update_data_len) orelse return null;
+    if (!putLe16(out, &pos, 1) or !appendMemBltOrder(out, &pos, cache_id, cache_index, x, y, width, height)) return null;
+    return if (pos == total) total else null;
+}
+
+fn buildFastPathCacheNscodecAndMemBltPdu(
+    out: []u8,
+    cache_id: u8,
+    cache_index: u16,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    codec_id: u32,
+    fingerprint: nscodec.Fingerprint,
+    use_wait_list: bool,
+    encoded: []const u8,
+) ?usize {
+    if (cache_id > 4 or encoded.len > 0xffff - 15 or encoded.len > std.math.maxInt(usize) - 51) return null;
+    const update_data_len = 51 + encoded.len;
+    var pos: usize = 0;
+    const total = beginFastPathUpdate(out, &pos, rdp_fastpath_update_orders, update_data_len) orelse return null;
+    const extra_flags: u16 = (rdp_cache_bpp_id_32 << 3) | cache_id |
+        (if (use_wait_list) rdp_cache_rev3_do_not_cache else 0);
+    const wire_cache_index = if (use_wait_list) rdp_cache_waiting_list_index else cache_index;
+    const cache_key = fingerprint.low ^ std.math.rotl(u64, fingerprint.high, 29);
+    if (!putLe16(out, &pos, 2) or
+        !putByte(out, &pos, rdp_order_standard | rdp_order_secondary) or
+        !putLe16(out, &pos, @intCast(encoded.len + 15)) or
+        !putLe16(out, &pos, extra_flags) or
+        !putByte(out, &pos, rdp_secondary_order_cache_bitmap_rev3) or
+        !putLe16(out, &pos, wire_cache_index) or
+        !putLe32(out, &pos, @truncate(cache_key)) or
+        !putLe32(out, &pos, @truncate(cache_key >> 32)) or
+        !appendExtendedBitmapData(out, &pos, width, height, codec_id, encoded) or
+        !appendMemBltOrder(out, &pos, cache_id, wire_cache_index, x, y, width, height)) return null;
+    return if (pos == total) total else null;
+}
+
+fn finishBitmapFrame(app: *const App, stats: *ServiceStats, info: *const r4os.abi.RemoteFrameInfo, geometry: bitmap_geometry.SessionGeometry, rect: bitmap_geometry.Rect, metrics: bitmap_geometry.ContentMetrics, cursor: ?*CursorTrack) bool {
     stats.bitmap_frames +%= 1;
     stats.last_frame_revision = info.revision;
     stats.last_frame_width = geometry.width;
@@ -4964,6 +5656,183 @@ fn selfTestBitmapGeometry(app: *const App) bool {
     return true;
 }
 
+fn fastPathUpdateData(packet: []const u8, expected_update_code: u8) ?[]const u8 {
+    if (packet.len < 5 or packet[0] != 0) return null;
+    var header_len: usize = 2;
+    var total: usize = packet[1];
+    if ((packet[1] & 0x80) != 0) {
+        if (packet.len < 6) return null;
+        header_len = 3;
+        total = (@as(usize, packet[1] & 0x7f) << 8) | packet[2];
+    }
+    if (total != packet.len or header_len + 3 > packet.len) return null;
+    const update_header = packet[header_len];
+    if ((update_header & 0x0f) != expected_update_code or (update_header & 0xf0) != 0) return null;
+    const data_len: usize = @intCast(readLe16(packet[header_len + 1 .. header_len + 3]));
+    const data_start = header_len + 3;
+    if (data_len != packet.len - data_start) return null;
+    return packet[data_start..];
+}
+
+fn xrgbChannelsNear(left: u32, right: u32, tolerance: u8) bool {
+    const shifts = [_]u5{ 16, 8, 0 };
+    for (shifts) |shift| {
+        const a: i16 = @intCast((left >> shift) & 0xff);
+        const b: i16 = @intCast((right >> shift) & 0xff);
+        if (@abs(a - b) > tolerance) return false;
+    }
+    return true;
+}
+
+fn selfTestNscodecGraphics(app: *const App) bool {
+    // Die produktiv beworbene Serverseite enthaelt genau NSCodec und die
+    // dazu benoetigte Surface-Faehigkeit; kein historischer JPEG-Blindeintrag.
+    var advertised: [64]u8 = .{0} ** 64;
+    var advertised_pos: usize = 0;
+    if (!writeDemandActiveBitmapCodecsCapability(advertised[0..], &advertised_pos)) return false;
+    if (advertised_pos != 27 or readLe16(advertised[0..2]) != rdp_cap_bitmap_codecs or
+        readLe16(advertised[2..4]) != 27 or advertised[4] != 1 or
+        !bytesEq(advertised[5..21], rdp_nscodec_guid[0..]) or advertised[21] != rdp_nscodec_id) return false;
+
+    // Reale Clientauswahl: Fast-Path + Surface + NSCodec sowie die komplette
+    // Cache-V3-Voraussetzung werden gemeinsam ausgewertet.
+    var capabilities: [256]u8 = .{0} ** 256;
+    var cap_pos: usize = 0;
+    if (!writeDemandActiveGeneralCapability(capabilities[0..], &cap_pos)) return false;
+    const order_start = cap_pos;
+    if (!writeDemandActiveOrderCapability(capabilities[0..], &cap_pos)) return false;
+    capabilities[order_start + 36 + rdp_order_mem3blt_index] = 1;
+    if (!writeCapabilityHeader(capabilities[0..], &cap_pos, rdp_cap_bitmap_cache_rev2, 40) or
+        !putLe16(capabilities[0..], &cap_pos, rdp_cache_wait_list_flag) or
+        !putByte(capabilities[0..], &cap_pos, 0) or
+        !putByte(capabilities[0..], &cap_pos, 1) or
+        !putLe32(capabilities[0..], &cap_pos, 64)) return false;
+    var cache_cell: usize = 1;
+    while (cache_cell < 5) : (cache_cell += 1) {
+        if (!putLe32(capabilities[0..], &cap_pos, 0)) return false;
+    }
+    var cache_pad: usize = 0;
+    while (cache_pad < 12) : (cache_pad += 1) {
+        if (!putByte(capabilities[0..], &cap_pos, 0)) return false;
+    }
+    if (!writeDemandActiveSurfaceCommandsCapability(capabilities[0..], &cap_pos)) return false;
+    const codec_start = cap_pos;
+    if (!writeDemandActiveBitmapCodecsCapability(capabilities[0..], &cap_pos)) return false;
+
+    var negotiated: ServiceStats = .{};
+    if (!parseGraphicsCapabilitySets(capabilities[0..cap_pos], 5, &negotiated)) return false;
+    if (!clientNscodecReady(&negotiated) or !clientBitmapCacheReady(&negotiated) or
+        negotiated.client_cache_wait_list != 1 or negotiated.client_cache_entries != 64) return false;
+    capabilities[codec_start + 21] = 9;
+    var unsupported: ServiceStats = .{};
+    if (!parseGraphicsCapabilitySets(capabilities[0..cap_pos], 5, &unsupported)) return false;
+    if (clientNscodecReady(&unsupported) or clientBitmapCacheReady(&unsupported)) return false;
+
+    const width: usize = 64;
+    const height: usize = 8;
+    const pixel_count = width * height;
+    var pixels: [pixel_count]u32 = .{0x0033_6699} ** pixel_count;
+    var encoded: [nscodec.stream_header_bytes + pixel_count * 3]u8 = undefined;
+    var workspace: nscodec.Workspace = .{};
+    const encode_start = app.sys.ticks();
+    const result = nscodec.encodeXrgb32(pixels[0..], width, height, &workspace, encoded[0..]) orelse return false;
+    const encode_ticks = app.sys.ticks() -% encode_start;
+    if (!nscodec.savesWireBytes(result.bytes, width, height, rdp_nscodec_selection_overhead)) return false;
+
+    var packet: [2048]u8 = undefined;
+    const surface_len = buildFastPathSurfaceNscodecPdu(packet[0..], 10, 20, width, height, rdp_nscodec_id, encoded[0..result.bytes]) orelse return false;
+    const surface = fastPathUpdateData(packet[0..surface_len], rdp_fastpath_update_surface_commands) orelse return false;
+    if (surface.len != 22 + result.bytes or readLe16(surface[0..2]) != rdp_surface_command_set_bits or
+        readLe16(surface[2..4]) != 10 or readLe16(surface[4..6]) != 20 or
+        readLe16(surface[6..8]) != 10 + width or readLe16(surface[8..10]) != 20 + height or
+        surface[10] != 32 or surface[13] != rdp_nscodec_id or
+        readLe16(surface[14..16]) != width or readLe16(surface[16..18]) != height or
+        readLe32(surface[18..22]) != result.bytes) return false;
+    var decoded: [pixel_count]u32 = undefined;
+    _ = nscodec.decodeXrgb32(surface[22..], width, height, &workspace, decoded[0..]) orelse return false;
+    for (pixels, decoded) |source, visible| {
+        if (!xrgbChannelsNear(source, visible, 2)) return false;
+    }
+    if (surface_len >= pixel_count * @sizeOf(u16)) return false;
+
+    // Ein Waiting-List-Client sieht beim ersten Auftreten CBR3_DO_NOT_CACHE,
+    // beim zweiten die stabile Cachepublikation und danach nur noch MemBlt.
+    const fingerprint = nscodec.fingerprintXrgb32(pixels[0..], width, height) orelse return false;
+    var cache = nscodec.TileCache.initWithWaitList(64, true);
+    const first = cache.decide(10, 20, width, height, 1, fingerprint) orelse return false;
+    if (!first.wait_list or first.hit) return false;
+    const wait_len = buildFastPathCacheNscodecAndMemBltPdu(
+        packet[0..],
+        0,
+        @intCast(first.slot),
+        10,
+        20,
+        width,
+        height,
+        rdp_nscodec_id,
+        fingerprint,
+        first.wait_list,
+        encoded[0..result.bytes],
+    ) orelse return false;
+    const wait_orders = fastPathUpdateData(packet[0..wait_len], rdp_fastpath_update_orders) orelse return false;
+    if (readLe16(wait_orders[0..2]) != 2 or
+        (readLe16(wait_orders[5..7]) & rdp_cache_rev3_do_not_cache) == 0 or
+        readLe16(wait_orders[8..10]) != rdp_cache_waiting_list_index) return false;
+    _ = cache.commit(first, 10, 20, width, height, 1, fingerprint, surface_len);
+
+    const second = cache.decide(10, 20, width, height, 2, fingerprint) orelse return false;
+    if (second.wait_list or second.hit) return false;
+    const publish_len = buildFastPathCacheNscodecAndMemBltPdu(
+        packet[0..],
+        0,
+        @intCast(second.slot),
+        10,
+        20,
+        width,
+        height,
+        rdp_nscodec_id,
+        fingerprint,
+        second.wait_list,
+        encoded[0..result.bytes],
+    ) orelse return false;
+    const publish_orders = fastPathUpdateData(packet[0..publish_len], rdp_fastpath_update_orders) orelse return false;
+    if ((readLe16(publish_orders[5..7]) & rdp_cache_rev3_do_not_cache) != 0 or
+        readLe16(publish_orders[8..10]) != second.slot) return false;
+    _ = cache.commit(second, 10, 20, width, height, 2, fingerprint, surface_len);
+
+    const third = cache.decide(10, 20, width, height, 3, fingerprint) orelse return false;
+    if (!third.hit or third.wait_list) return false;
+    const hit_len = buildFastPathMemBltPdu(packet[0..], 0, @intCast(third.slot), 10, 20, width, height) orelse return false;
+    const hit_orders = fastPathUpdateData(packet[0..hit_len], rdp_fastpath_update_orders) orelse return false;
+    if (readLe16(hit_orders[0..2]) != 1 or hit_len >= surface_len) return false;
+
+    pixels[0] ^= 0x0000_00ff;
+    const changed_fingerprint = nscodec.fingerprintXrgb32(pixels[0..], width, height) orelse return false;
+    const changed = cache.decide(10, 20, width, height, 4, changed_fingerprint) orelse return false;
+    if (changed.hit or !changed.invalidates or !changed.wait_list) return false;
+
+    // Beide Fallbackgruende bleiben reproduzierbar: ein kaputter Encoderlauf
+    // und ein gueltiger, aber gegen Raw16 unwirtschaftlicher Inhalt.
+    var too_small: [19]u8 = undefined;
+    if (nscodec.encodeXrgb32(pixels[0..], width, height, &workspace, too_small[0..]) != null) return false;
+    var seed: u32 = 0x1234_5678;
+    for (&pixels) |*pixel| {
+        seed = seed *% 1664525 +% 1013904223;
+        pixel.* = seed & 0x00ff_ffff;
+    }
+    const noisy = nscodec.encodeXrgb32(pixels[0..], width, height, &workspace, encoded[0..]) orelse return false;
+    if (nscodec.savesWireBytes(noisy.bytes, width, height, rdp_nscodec_selection_overhead)) return false;
+
+    app.sys.write("RDPSVC nscodec selftest: ok negotiation=ns1 decode=visible cache=wait/publish/hit fallback=error/wire encode_ticks=");
+    app.sys.printU64(encode_ticks);
+    app.sys.write(" raw=");
+    app.sys.printU64(pixel_count * @sizeOf(u16));
+    app.sys.write(" wire=");
+    app.sys.printU64(surface_len);
+    app.sys.println("");
+    return true;
+}
+
 fn runSelfTest(app: *const App) i32 {
     app.sys.println("RDPSVC selftest");
     if (!app.sys.hasFn("service_call")) return fail(app, "service-api");
@@ -4976,6 +5845,7 @@ fn runSelfTest(app: *const App) i32 {
     if (!bytesEq(spanZ(config.client_target[0..]), default_client_target)) return fail(app, "client-target");
     if (!selfTestRleCodec(app)) return fail(app, "rle-codec");
     if (!selfTestBitmapGeometry(app)) return fail(app, "bitmap-geometry");
+    if (!selfTestNscodecGraphics(app)) return fail(app, "nscodec-graphics");
     if (!selfTestNegotiationCompatibility(app)) return fail(app, "negotiation-compat");
     var modern_stats: ServiceStats = .{};
     if (!selfTestModernProtocolContracts(app, &modern_stats, &config)) {

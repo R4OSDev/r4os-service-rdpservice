@@ -417,3 +417,52 @@ Checksum dient nur noch als positionssensitiver Aenderungswert. Abruf:
 Das permanente `Run-RdpBitmapGeometryContract0596.ps1`, der RDPSVC-Selftest
 und `Run-RdpServiceLiveTest.ps1` pruefen Geometrien, Raw16-Rand, PDU-Budgets,
 Demand Active, Bitmap/Input und die bestehenden Classic-/TLS-/CredSSP-Pfade.
+
+Wirksame Bildcodecs und Bitmapcache seit 0.69.52
+------------------------------------------------
+
+RDPSVC kuendigt nur noch den tatsaechlich implementierten NSCodec an. Der
+fruehere JPEG-Eintrag ohne produktiven Encoder wurde entfernt. NSCodec wird
+nur gewaehlt, wenn Confirm Active gemeinsam Fast-Path-Ausgabe, Set Surface
+Bits und den clientseitig mit ID 1 angebotenen Codec bestaetigt. Die
+RDP-Sitzung verwendet dafuer 32 bpp; RLE16 und Raw16/Raw32 bleiben als
+rechtecklokale, wahrheitsgemaess gekennzeichnete Fallbacks erhalten.
+
+Der originale R4OS-Encoder arbeitet mit maximal 256x16 Pixel grossen
+XRGB32-Kacheln und dem konservativen Profil CLL 1 ohne Chroma-Subsampling.
+Er bildet die Luma-, Orange-Chroma- und Green-Chroma-Ebenen, laesst die bei
+vollstaendig deckenden XRGB-Frames triviale Alphaebene weg und verwendet die
+NSCodec-RLE pro Ebene nur, wenn sie kleiner als die Rohform ist. Eine Kachel
+wird erst ab 64 Pixeln und mindestens 12,5 Prozent Vorteil gegen den
+gepaddeten Raw16-Vergleich inklusive eines konservativen Headerbudgets ueber
+Fast-Path Set Surface Bits publiziert. Encoderfehler, unguenstige kleine oder
+literalreiche Inhalte laufen unmittelbar ueber RLE16 beziehungsweise Raw.
+
+Der optionale Bitmapcache verlangt zusaetzlich Revision-2-Cacheparameter,
+`ORDERFLAGS_EX_CACHE_BITMAP_REV3_SUPPORT` sowie MemBlt und Mem3Blt. RDPSVC
+bildet jede Serverkachel deterministisch auf einen ausgehandelten
+Clientcacheeintrag ab. Bei Clients mit Waiting List wird das erste Auftreten
+mit `CBR3_DO_NOT_CACHE` und Index 32767 gesendet, das zweite dauerhaft per
+Cache Bitmap Revision 3 publiziert und erst ein weiteres Auftreten per
+MemBlt wiederverwendet. Bindung und Invalidierung enthalten Position,
+Geometrie, einen 128-Bit-Inhaltsfingerprint und die aktuelle
+RemoteFrame-Generation. Ein Cachezustand wird erst nach erfolgreichem
+Wire-Write festgeschrieben; geaenderte oder kollidierende Kacheln werden vor
+einem moeglichen Fallback ungueltig.
+
+`SERVMAN STATUS RDPSVC` zeigt die ausgehandelten Grafikfaehigkeiten, NSCodec-
+Kacheln, codierte/Roh-/Wirebytes, Encoderticks, Fallbacks sowie Surface-,
+Waiting-List-, Cache-, Hit-, Invalidierungs- und Einsparungszaehler. Der im
+Testimage ausgefuehrte `/SELFTEST` prueft die Capability-Auswahl ohne
+ungetragenen Codec, den sichtbaren Decode-Endzustand, Fast-Path-Surface und
+Cache-V3/MemBlt bytegenau, Waiting-List-Promotion, Generationinvalidierung,
+Encoderfehler, unwirtschaftlichen Fallback, Encodezeit und Wirebytes. Die
+direkten Zig-Tests in `src/nscodec.zig` ergaenzen Grenz-, RLE-, Farb- und
+Cachefaelle.
+
+Die Implementierung ist originaler R4OS-Code. Fachliche Grundlage sind die
+veroeffentlichten Protokollspezifikationen MS-RDPBCGR, MS-RDPEGDI und
+MS-RDPNSC. Die separat unter `ExFiles/Reference/XRDP` liegende
+Apache-2.0-Referenz wurde nur fuer einen unabhaengigen Wireformat-Gegencheck
+gelesen; es ist kein externer Codecquelltext oder sonstiges Fremdmaterial in
+RDPSVC eingebunden.
