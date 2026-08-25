@@ -45,6 +45,13 @@ zeigt zusaetzlich Bitmap-/Frame-Zaehler, Dirty-Rect, letzte Revision,
 Payload-Pruefsumme sowie Input-PDU-, Event-, Key-, Mouse-, Wheel- und
 Push-Zaehler.
 
+Seit 0.69.47 registriert jede angenommene RDP-Sitzung fuer ihre gesamte
+Lebensdauer genau einen R4DESK-Remote-Frame-Konsumenten. Der erste Acquire
+weckt den Desktop und fordert einen vollstaendigen Ausgangsframe an; jeder
+Handshake-, Protokoll-, Disconnect- und Erfolgsweg gibt die Registrierung per
+defer wieder frei. Ohne aktive RDP-Sitzung verursacht RDPSVC damit keinen
+Vollbild-Shadow und keine Desktop-Kopie.
+
 Seit 0.52.17 zaehlt RDPSVC den Session-Lifecycle explizit: abgeschlossene
 Sitzungen, Reconnects, erkannte Disconnects, Cleanup, Close-Fehler,
 Listener-Close, Session-Limit-Wartefaelle, letztes Session-Ergebnis und

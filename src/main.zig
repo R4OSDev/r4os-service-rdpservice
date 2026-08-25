@@ -1465,6 +1465,21 @@ const RdpTransport = struct {
 };
 
 fn handleRdpClient(app: *const App, stream: TcpStream, stats: *ServiceStats, config: *const Config, modern_security: *const ModernSecurityProfile) SessionResult {
+    const demand_supported = app.desk.supportsRemoteFrameDemand();
+    var frame_acquired = false;
+    if (demand_supported) {
+        const acquire_rc = app.desk.remoteFrameAcquire();
+        if (acquire_rc <= 0) {
+            stats.bitmap_errors +%= 1;
+            setLastError(stats, "frame-acquire");
+            return .protocol_error;
+        }
+        frame_acquired = true;
+    }
+    defer {
+        if (frame_acquired) _ = app.desk.remoteFrameRelease();
+    }
+
     var packet: [rdp_max_packet]u8 = .{0} ** rdp_max_packet;
     const packet_len = readTpktPacket(app, stream, packet[0..], 11, stats, "initial") orelse return classifySessionError(stats);
     var initial = parseInitialPacket(packet[0..packet_len], stats) orelse return classifySessionError(stats);
