@@ -344,14 +344,18 @@ Windows-`mstsc.exe`-Pass offen.
 
 Manuelle Sichtabnahme:
 
-    DevTools\Scripts\Build.bat -gui
+    Tools\Build.bat -gui
     DevTools\Logs\RdpProfiles\R4OS-Modern-NLA.rdp
+
+Unter Linux startet `./Tools/Build.sh -gui` denselben gemeinsamen
+PowerShell-7-Ablauf.
 
 Benutzer `r4os`, Passwort `rosebud`.
 
 Profilhilfe fuer Host-Tests:
 
-`Build.bat -gui`, `-qemu` und `-guionly` schreiben reproduzierbare
+`Tools\Build.bat -gui`, `-qemu` und `-guionly` beziehungsweise die
+entsprechenden `./Tools/Build.sh`-Aufrufe schreiben reproduzierbare
 `.rdp`-Profile nach `DevTools\Logs\RdpProfiles\`. `Classic` ist der
 vorhandene R4OS-Classic-Pfad ohne NLA/CredSSP. `Modern` erzwingt den
 aktuellen mstsc-Zielpfad. Seit 0.55.29 ist der erwartete TLS-Alert aus dem
