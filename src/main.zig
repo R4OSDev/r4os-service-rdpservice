@@ -112,12 +112,13 @@ const r4tls_op_productive_contract: u32 = 12;
 const r4tls_op_stream_alert_record: u32 = 10;
 const r4tls_op_tls12_session_contract: u32 = 20;
 const r4tls_op_tls12_session_harness: u32 = 21;
+const r4tls_op_tls12_server_binding_key: u32 = 33;
 const r4tls_op_tls12_live_begin: u32 = 22;
 const r4tls_op_tls12_live_finish: u32 = 23;
 const r4tls_op_tls12_app_write: u32 = 24;
 const r4tls_op_tls12_app_read: u32 = 25;
 const r4auth_op_ntlmv2_profile: u32 = 7;
-const r4auth_op_validate_fixed_credentials: u32 = 8;
+const r4auth_op_validate_config: u32 = 8;
 const r4auth_op_error_contract: u32 = 9;
 const r4auth_op_credssp_state_contract: u32 = 10;
 const r4auth_op_credssp_begin_session: u32 = 21;
@@ -135,6 +136,8 @@ const r4auth_result_missing_tls_context: i32 = -23;
 const r4auth_result_bad_pubkeyauth: i32 = -24;
 const r4auth_result_bad_state: i32 = -25;
 const r4auth_result_unsupported_ntlm: i32 = -26;
+const r4auth_result_entropy_unavailable: i32 = -27;
+const r4auth_result_bad_config: i32 = -28;
 const security_state_classic = "classic";
 const security_state_tls = "tls";
 const security_state_credssp = "credssp";
@@ -150,14 +153,6 @@ const r4tls_magic_app_write_in = "R4AW";
 const r4tls_magic_app_write_out = "R4WX";
 const r4tls_magic_app_read_in = "R4AR";
 const r4tls_magic_app_read_out = "R4RX";
-const r4auth_magic_live_state = "R4C2";
-const r4auth_live_header_len: usize = 20;
-const r4auth_live_frame_max: usize = r4auth_live_header_len + r4tls_live_stream_state_len + rdp_max_packet;
-const r4auth_live_phase_negotiate: u8 = 1;
-const r4auth_live_phase_authenticate: u8 = 2;
-const r4auth_live_phase_pubkeyauth: u8 = 3;
-const r4auth_live_variant_ntlm: u8 = 1;
-const r4auth_live_flag_tls: u8 = 0x01;
 const rdp_neg_req_type: u8 = 1;
 const rdp_neg_resp_type: u8 = 2;
 const x224_cr_type: u8 = 0xE0;
@@ -1627,6 +1622,7 @@ fn handleRdpClient(app: *const App, stream: TcpStream, stats: *ServiceStats, con
     if (isModernSelected(stats.last_selected_protocol)) {
         if (!runModernSecurityPrelude(app, stream, packet[0..], stats, config, modern_security, &initial)) return classifySessionError(stats);
         var tls_wire = TlsWireState{};
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&tls_wire));
         if (runModernTlsWireHandshake(app, stream, stats, &tls_wire)) {
             app.sys.write("RDPSVC TLS wire OK conn=");
             app.sys.printU64(@intCast(stream.conn_id));
@@ -1885,6 +1881,7 @@ fn prepareModernSecurityProfile(app: *const App, stats: *ServiceStats, config: *
 
 fn runModernSecurityPrelude(app: *const App, stream: TcpStream, scratch: []u8, stats: *ServiceStats, config: *const Config, modern_security: *const ModernSecurityProfile, initial: *const RdpInitial) bool {
     _ = scratch;
+    _ = config;
     _ = initial;
     if (!modern_security.ready or !modern_security.tls_session_ready) {
         const blocker = if (spanZ(modern_security.blocker[0..]).len != 0) spanZ(modern_security.blocker[0..]) else "modern-profile";
@@ -1903,12 +1900,6 @@ fn runModernSecurityPrelude(app: *const App, stream: TcpStream, scratch: []u8, s
         stats.r4auth_live_ok +%= 1;
         if (!modern_security.credssp_loop_ready) return modernSecurityFailure(app, stream, stats, "r4auth-live-loop-profile");
         stats.r4auth_loop_ok +%= 1;
-        stats.auth_successes +%= 1;
-        stats.security_auth_ok +%= 1;
-        copyFixedZ(stats.last_auth_user[0..], spanZ(config.user_name[0..]));
-        if (config.log_passwords) copyFixedZ(stats.last_auth_password[0..], spanZ(config.password[0..]));
-        copyFixedZ(stats.last_security_state[0..], security_state_auth_ok);
-        logAuth(app, r4os.abi.log_severity_info, "auth-ok", spanZ(config.user_name[0..]), spanZ(config.password[0..]), config.log_passwords);
     }
 
     setLastError(stats, "modern-security-ok");
@@ -1929,14 +1920,17 @@ fn modernSecurityFailure(app: *const App, stream: TcpStream, stats: *ServiceStat
     return false;
 }
 
-fn buildFixedCredentialRequest(out: []u8, config: *const Config) []const u8 {
-    var pos: usize = 0;
-    appendText(out, &pos, "tls=protected;user=");
-    appendText(out, &pos, spanZ(config.user_name[0..]));
-    appendText(out, &pos, ";password=");
-    appendText(out, &pos, spanZ(config.password[0..]));
-    appendText(out, &pos, ";domain=;mech=ntlm");
-    return out[0..pos];
+fn buildCredsspConfigRequest(out: []u8, config: *const Config) []const u8 {
+    const user = spanZ(&config.user_name);
+    const password = spanZ(&config.password);
+    const total = 8 + user.len + password.len;
+    if (out.len < total) return "";
+    @memcpy(out[0..4], "R4AC");
+    writeLe16(out[4..6], @intCast(user.len));
+    writeLe16(out[6..8], @intCast(password.len));
+    @memcpy(out[8..][0..user.len], user);
+    @memcpy(out[8 + user.len .. total], password);
+    return out[0..total];
 }
 
 fn sendModernTlsAlert(app: *const App, stream: TcpStream, stats: *ServiceStats) bool {
@@ -1986,6 +1980,7 @@ fn runModernTlsWireHandshake(app: *const App, stream: TcpStream, stats: *Service
     finish_len += finished_len;
 
     var finish_out: [r4tls_dispatch_max]u8 = .{0} ** r4tls_dispatch_max;
+    defer std.crypto.secureZero(u8, &finish_out);
     const finish = dispatchProtocolBytes(app, r4tls_role, r4tls_op_tls12_live_finish, finish_in[0..finish_len], finish_out[0..], stats, "r4tls-live-finish") orelse return false;
     const finish_parts = parseR4TlsFramedOutput(finish, r4tls_magic_live_finish, stats, "r4tls-live-finish-frame") orelse return false;
     if (finish_parts.state.len != r4tls_live_stream_state_len or finish_parts.payload.len == 0) return tlsWireError(stats, "r4tls-live-finish-size");
@@ -1998,39 +1993,112 @@ fn runModernTlsWireHandshake(app: *const App, stream: TcpStream, stats: *Service
     return true;
 }
 
-fn runModernCredsspLiveLoop(app: *const App, stream: TcpStream, stats: *ServiceStats, config: *const Config, tls: *TlsWireState) bool {
-    var plain: [rdp_max_packet]u8 = .{0} ** rdp_max_packet;
-    var state_text: [768]u8 = .{0} ** 768;
-    var challenge: [1024]u8 = .{0} ** 1024;
-    // Connection-local state; never taken from client input or shared with another loop.
-    var server_challenge: [8]u8 = undefined;
-    defer std.crypto.secureZero(u8, &server_challenge);
-    const session = dispatchProtocolBytes(app, r4auth_role, r4auth_op_credssp_begin_session, "", &server_challenge, stats, "credssp-session") orelse return false;
-    if (session.len != server_challenge.len) return markCredsspLiveError(stats, "credssp-session-size", r4auth_result_bad_state);
+const credssp_state_capacity: usize = 4096;
+const credssp_response_capacity: usize = 16 + credssp_state_capacity + rdp_max_packet;
+const OwnedCredssp = struct {
+    state: [credssp_state_capacity]u8 = .{0} ** credssp_state_capacity,
+    length: usize = 0,
+};
 
-    const negotiate_len = tlsWireRead(app, stream, tls, plain[0..], stats, "credssp-negotiate-read", rdp_handshake_timeout_ms) orelse return false;
-    const negotiate_state = dispatchCredsspLiveState(app, stats, tls, server_challenge, r4auth_live_phase_negotiate, plain[0..negotiate_len], state_text[0..], "credssp-negotiate") orelse return false;
-    if (findBytes(negotiate_state, "phase=negotiate") == null or findBytes(negotiate_state, "next=send_challenge") == null) return markCredsspLiveError(stats, "credssp-negotiate-state", r4auth_result_bad_state);
-    stats.r4auth_live_negotiate_ok +%= 1;
+fn adoptCredsspReply(session: *OwnedCredssp, reply: []const u8, expected_phase: u8) ?[]const u8 {
+    if (reply.len < 16 or !bytesEq(reply[0..4], "R4AO")) return null;
+    const state_len: usize = readLe32(reply[4..8]);
+    const wire_len: usize = readLe32(reply[8..12]);
+    if (state_len == 0 or state_len > session.state.len or wire_len > rdp_max_packet or
+        16 + state_len + wire_len != reply.len or reply[12] != expected_phase or
+        !std.mem.allEqual(u8, reply[13..16], 0)) return null;
+    @memcpy(session.state[0..state_len], reply[16..][0..state_len]);
+    session.length = state_len;
+    return reply[16 + state_len ..];
+}
 
-    const challenge_bytes = dispatchProtocolBytes(app, r4auth_role, r4auth_op_credssp_build_challenge, &server_challenge, challenge[0..], stats, "credssp-challenge") orelse return false;
-    if (!tlsWireWrite(app, stream, tls, challenge_bytes, stats, "credssp-challenge-write")) return false;
+fn buildCredsspOwnedFrame(out: []u8, session: *const OwnedCredssp, tls: *const TlsWireState, tsrequest: []const u8) ?usize {
+    if (!tls.active or session.length == 0 or session.length > session.state.len or tsrequest.len > rdp_max_packet) return null;
+    const total = 16 + session.length + tls.stream_state.len + tsrequest.len;
+    if (total > out.len) return null;
+    @memcpy(out[0..4], "R4C3");
+    writeLe32(out[4..8], @intCast(session.length));
+    writeLe32(out[8..12], @intCast(tls.stream_state.len));
+    writeLe32(out[12..16], @intCast(tsrequest.len));
+    @memcpy(out[16..][0..session.length], session.state[0..session.length]);
+    @memcpy(out[16 + session.length ..][0..tls.stream_state.len], &tls.stream_state);
+    @memcpy(out[16 + session.length + tls.stream_state.len .. total], tsrequest);
+    return total;
+}
 
-    const authenticate_len = tlsWireRead(app, stream, tls, plain[0..], stats, "credssp-authenticate-read", rdp_handshake_timeout_ms) orelse return false;
-    const authenticate_state = dispatchCredsspLiveState(app, stats, tls, server_challenge, r4auth_live_phase_authenticate, plain[0..authenticate_len], state_text[0..], "credssp-authenticate") orelse return false;
-    if (findBytes(authenticate_state, "phase=authenticate") == null or findBytes(authenticate_state, "auth=ok") == null) return markCredsspLiveError(stats, "credssp-authenticate-state", r4auth_result_bad_state);
-    stats.r4auth_live_authenticate_ok +%= 1;
-    if (findBytes(authenticate_state, "complete=yes") != null) {
-        if (findBytes(authenticate_state, "next=rdp") == null) return markCredsspLiveError(stats, "credssp-authenticate-complete-state", r4auth_result_bad_state);
-        stats.r4auth_live_pubkey_ok +%= 1;
-        return finishModernCredsspLiveLoop(app, stats, config);
+fn buildCredsspBegin(out: []u8, config: *const Config, tls: *const TlsWireState, public_key: []const u8) ?usize {
+    const user = spanZ(&config.user_name);
+    const password = spanZ(&config.password);
+    if (!tls.active or user.len == 0 or password.len == 0 or public_key.len == 0 or public_key.len > 1024) return null;
+    const total = 12 + user.len + password.len + tls.stream_state.len + public_key.len;
+    if (total > out.len) return null;
+    @memcpy(out[0..4], "R4AI");
+    writeLe16(out[4..6], @intCast(user.len));
+    writeLe16(out[6..8], @intCast(password.len));
+    writeLe16(out[8..10], @intCast(tls.stream_state.len));
+    writeLe16(out[10..12], @intCast(public_key.len));
+    var pos: usize = 12;
+    for ([_][]const u8{ user, password, &tls.stream_state, public_key }) |part| {
+        @memcpy(out[pos..][0..part.len], part);
+        pos += part.len;
     }
-    if (findBytes(authenticate_state, "next=pubkeyauth") == null) return markCredsspLiveError(stats, "credssp-authenticate-next-state", r4auth_result_bad_state);
+    return total;
+}
 
-    const pubkey_len = tlsWireRead(app, stream, tls, plain[0..], stats, "credssp-pubkeyauth-read", rdp_handshake_timeout_ms) orelse return false;
-    const pubkey_state = dispatchCredsspLiveState(app, stats, tls, server_challenge, r4auth_live_phase_pubkeyauth, plain[0..pubkey_len], state_text[0..], "credssp-pubkeyauth") orelse return false;
-    if (findBytes(pubkey_state, "phase=pubkeyauth") == null or findBytes(pubkey_state, "complete=yes") == null or findBytes(pubkey_state, "auth=ok") == null) return markCredsspLiveError(stats, "credssp-pubkeyauth-state", r4auth_result_bad_state);
-    stats.r4auth_live_pubkey_ok +%= 1;
+fn dispatchCredsspOwned(app: *const App, stats: *ServiceStats, op: u32, input: []const u8, out: []u8, label: []const u8) ?[]const u8 {
+    const in_buffer = r4os.abi.ProtocolBuffer{ .data = @constCast(input.ptr), .len = @intCast(input.len), .capacity = @intCast(input.len) };
+    var out_buffer = r4os.abi.ProtocolBuffer{ .data = out.ptr, .len = 0, .capacity = @intCast(out.len) };
+    const rc = app.dev.protocolDispatch(r4auth_role, op, &in_buffer, &out_buffer);
+    if (rc != 0 or out_buffer.len > out.len) {
+        _ = markCredsspLiveError(stats, label, if (rc != 0) rc else r4auth_result_bad_state);
+        app.sys.write("RDPSVC CredSSP failed: ");
+        app.sys.write(spanZ(&stats.last_error));
+        app.sys.println("");
+        return null;
+    }
+    stats.r4auth_dispatch_ok +%= 1;
+    return out[0..out_buffer.len];
+}
+
+fn runModernCredsspLiveLoop(app: *const App, stream: TcpStream, stats: *ServiceStats, config: *const Config, tls: *TlsWireState) bool {
+    const failures_before = stats.auth_failures;
+    defer {
+        if (stats.auth_failures != failures_before) copyFixedZ(&stats.last_failed_auth_user, spanZ(&config.user_name));
+    }
+    var session = OwnedCredssp{};
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&session));
+    var response: [credssp_response_capacity]u8 = undefined;
+    defer std.crypto.secureZero(u8, &response);
+    var begin: [12 + 64 + r4tls_live_stream_state_len + 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &begin);
+    var public_key: [1024]u8 = undefined;
+    const key = dispatchProtocolBytes(app, r4tls_role, r4tls_op_tls12_server_binding_key, &tls.stream_state, &public_key, stats, "credssp-tls-key") orelse return false;
+    const begin_len = buildCredsspBegin(&begin, config, tls, key) orelse return markCredsspLiveError(stats, "credssp-config", r4auth_result_bad_config);
+    const initialized = dispatchCredsspOwned(app, stats, r4auth_op_credssp_begin_session, begin[0..begin_len], &response, "credssp-begin") orelse return false;
+    const empty = adoptCredsspReply(&session, initialized, 1) orelse return markCredsspLiveError(stats, "credssp-begin-state", r4auth_result_bad_state);
+    if (empty.len != 0) return markCredsspLiveError(stats, "credssp-begin-data", r4auth_result_bad_state);
+    std.crypto.secureZero(u8, &begin);
+
+    var plain: [rdp_max_packet]u8 = undefined;
+    defer std.crypto.secureZero(u8, &plain);
+    var frame: [16 + credssp_state_capacity + r4tls_live_stream_state_len + rdp_max_packet]u8 = undefined;
+    defer std.crypto.secureZero(u8, &frame);
+    for ([_][]const u8{ "credssp-negotiate", "credssp-authenticate", "credssp-credentials" }, 0..) |label, index| {
+        const length = tlsWireRead(app, stream, tls, &plain, stats, label, rdp_handshake_timeout_ms) orelse return false;
+        const frame_len = buildCredsspOwnedFrame(&frame, &session, tls, plain[0..length]) orelse return markCredsspLiveError(stats, "credssp-frame", r4auth_result_bad_state);
+        const reply = dispatchCredsspOwned(app, stats, r4auth_op_credssp_process_live_state, frame[0..frame_len], &response, label) orelse return false;
+        const payload = adoptCredsspReply(&session, reply, @intCast(index + 2)) orelse return markCredsspLiveError(stats, "credssp-next-state", r4auth_result_bad_state);
+        if (index < 2) {
+            if (payload.len == 0) return markCredsspLiveError(stats, "credssp-missing-reply", r4auth_result_bad_state);
+            if (!tlsWireWrite(app, stream, tls, payload, stats, label)) return false;
+        } else if (payload.len != 0) return markCredsspLiveError(stats, "credssp-final-data", r4auth_result_bad_state);
+        switch (index) {
+            0 => stats.r4auth_live_negotiate_ok +%= 1,
+            1 => stats.r4auth_live_authenticate_ok +%= 1,
+            2 => stats.r4auth_live_pubkey_ok +%= 1,
+            else => unreachable,
+        }
+    }
     return finishModernCredsspLiveLoop(app, stats, config);
 }
 
@@ -2046,52 +2114,6 @@ fn finishModernCredsspLiveLoop(app: *const App, stats: *ServiceStats, config: *c
     return true;
 }
 
-fn dispatchCredsspLiveState(app: *const App, stats: *ServiceStats, tls: *const TlsWireState, server_challenge: [8]u8, phase: u8, tsrequest: []const u8, out: []u8, label: []const u8) ?[]const u8 {
-    var frame: [r4auth_live_frame_max]u8 = .{0} ** r4auth_live_frame_max;
-    const frame_len = buildCredsspLiveStateFrame(frame[0..], phase, tls, server_challenge, tsrequest) orelse {
-        _ = markCredsspLiveError(stats, "credssp-frame", r4auth_result_bad_state);
-        return null;
-    };
-    var in_buffer = r4os.abi.ProtocolBuffer{
-        .data = &frame,
-        .len = @intCast(frame_len),
-        .capacity = frame.len,
-    };
-    var out_buffer = r4os.abi.ProtocolBuffer{
-        .data = if (out.len == 0) null else out.ptr,
-        .len = 0,
-        .capacity = @intCast(out.len),
-    };
-    const rc = app.dev.protocolDispatch(r4auth_role, r4auth_op_credssp_process_live_state, &in_buffer, &out_buffer);
-    if (rc != 0) {
-        app.sys.write("RDPSVC CredSSP live failed: ");
-        app.sys.write(label);
-        app.sys.write(" rc=");
-        printI32(app, rc);
-        app.sys.println("");
-        _ = markCredsspLiveError(stats, label, rc);
-        return null;
-    }
-    stats.r4auth_dispatch_ok +%= 1;
-    return out[0..@intCast(out_buffer.len)];
-}
-
-fn buildCredsspLiveStateFrame(out: []u8, phase: u8, tls: *const TlsWireState, server_challenge: [8]u8, tsrequest: []const u8) ?usize {
-    if (!tls.active) return null;
-    const total = r4auth_live_header_len + tls.stream_state.len + tsrequest.len;
-    if (total > out.len) return null;
-    @memcpy(out[0..4], r4auth_magic_live_state);
-    out[4] = phase;
-    out[5] = r4auth_live_variant_ntlm;
-    out[6] = r4auth_live_flag_tls;
-    out[7] = 0;
-    writeLe32(out[8..12], @intCast(tls.stream_state.len));
-    @memcpy(out[12..20], &server_challenge);
-    @memcpy(out[r4auth_live_header_len .. r4auth_live_header_len + tls.stream_state.len], tls.stream_state[0..]);
-    if (tsrequest.len != 0) @memcpy(out[r4auth_live_header_len + tls.stream_state.len .. total], tsrequest);
-    return total;
-}
-
 fn markCredsspLiveError(stats: *ServiceStats, label: []const u8, rc: i32) bool {
     const mapped = credsspLiveErrorLabel(label, rc);
     stats.r4auth_live_errors +%= 1;
@@ -2103,7 +2125,6 @@ fn markCredsspLiveError(stats: *ServiceStats, label: []const u8, rc: i32) bool {
             stats.auth_failures +%= 1;
             stats.security_auth_fail +%= 1;
             copyFixedZ(stats.last_security_state[0..], security_state_auth_fail);
-            copyFixedZ(stats.last_failed_auth_user[0..], default_user_name);
         },
         else => {
             stats.security_blockers +%= 1;
@@ -2124,6 +2145,8 @@ fn credsspLiveErrorLabel(label: []const u8, rc: i32) []const u8 {
         r4auth_result_bad_pubkeyauth => "credssp-bad-pubkeyauth",
         r4auth_result_bad_state => "credssp-bad-state",
         r4auth_result_unsupported_ntlm => "credssp-unsupported-ntlm",
+        r4auth_result_entropy_unavailable => "credssp-entropy-unavailable",
+        r4auth_result_bad_config => "credssp-bad-config",
         else => "credssp-live-error",
     };
 }
@@ -2322,6 +2345,10 @@ fn dispatchProtocolBytesWithPolicy(app: *const App, role: []const u8, op: u32, i
         } else {
             setLastError(stats, label);
         }
+        return null;
+    }
+    if (out_buffer.len > out.len) {
+        _ = modernSecurityBlocker(stats, "protocol-output-size");
         return null;
     }
     if (bytesEq(role, r4tls_role)) {
@@ -3015,6 +3042,7 @@ fn validateActivationClientInfo(app: *const App, stats: *ServiceStats, info: Rdp
 }
 
 fn validateModernActivationClientInfo(app: *const App, stats: *ServiceStats, info: RdpClientInfo, config: *const Config) bool {
+    if (!isCredsspSelected(stats.last_selected_protocol)) return checkAuth(app, stats, info, config);
     const user = spanZ(info.user_name[0..]);
     const expected = spanZ(config.user_name[0..]);
     if (user.len != 0 and !bytesEq(user, expected)) {
@@ -5871,60 +5899,22 @@ fn runSelfTest(app: *const App) i32 {
     return 0;
 }
 
+// Runtime admission validates the protocol contract and configured input.
+// Diagnostic fixtures never count as an authenticated connection.
 fn selfTestModernProtocolContracts(app: *const App, stats: *ServiceStats, config: *const Config) bool {
     if (!app.dev.hasFn("protocol_dispatch")) return modernSecurityBlocker(stats, "protocol-dispatch");
-
-    var out: [1280]u8 = .{0} ** 1280;
-    const tls_contract = dispatchProtocolText(app, r4tls_role, r4tls_op_stream_contract, "", out[0..], stats, "r4tls-contract") orelse return false;
-    if (findBytes(tls_contract, "stream-contract") == null) return modernSecurityBlocker(stats, "r4tls-contract-text");
-    if (!preflightR4TlsStreamAdapter(app, stats, tls_contract, out[0..])) return false;
-    const tls_session_contract = dispatchProtocolText(app, r4tls_role, r4tls_op_tls12_session_contract, "", out[0..], stats, "r4tls-session-contract") orelse return false;
-    if (findBytes(tls_session_contract, "tls12-session-contract") == null or findBytes(tls_session_contract, "rdpsvc=consumer-only") == null) return modernSecurityBlocker(stats, "r4tls-session-contract-text");
-    const tls_session = dispatchProtocolText(app, r4tls_role, r4tls_op_tls12_session_harness, "", out[0..], stats, "r4tls-session") orelse return false;
-    if (findBytes(tls_session, "client_finished=ok") == null or findBytes(tls_session, "server_finished=ok") == null or findBytes(tls_session, "next=credssp") == null) return modernSecurityBlocker(stats, "r4tls-session-text");
+    var out: [1280]u8 = undefined;
+    const tls_contract = dispatchProtocolText(app, r4tls_role, r4tls_op_stream_contract, "", &out, stats, "r4tls-contract") orelse return false;
+    if (!preflightR4TlsStreamAdapter(app, stats, tls_contract, &out)) return false;
+    const auth_contract = dispatchProtocolText(app, r4auth_role, r4auth_op_credssp_live_contract, "", &out, stats, "r4auth-contract") orelse return false;
+    if (findBytes(auth_contract, "input=R4C3;reply=R4AO") == null or findBytes(auth_contract, "credentials=configured") == null or findBytes(auth_contract, "proof=ntlmv2-ess128") == null) return modernSecurityBlocker(stats, "r4auth-session-contract");
+    var request: [160]u8 = undefined;
+    defer std.crypto.secureZero(u8, &request);
+    const input = buildCredsspConfigRequest(&request, config);
+    const valid = dispatchProtocolBytesNoBlocker(app, r4auth_role, r4auth_op_validate_config, input, &out, stats, "r4auth-config") orelse return false;
+    if (findBytes(valid, "valid=yes;auth=pending") == null) return modernSecurityBlocker(stats, "r4auth-config-text");
     stats.r4tls_session_ok +%= 1;
-
-    const auth_state = dispatchProtocolText(app, r4auth_role, r4auth_op_credssp_state_contract, "", out[0..], stats, "r4auth-state") orelse return false;
-    if (findBytes(auth_state, "credssp-state-machine") == null) return modernSecurityBlocker(stats, "r4auth-state-text");
-    const windows_contract = dispatchProtocolText(app, r4auth_role, r4auth_op_credssp_windows_contract, "", out[0..], stats, "r4auth-windows-contract") orelse return false;
-    if (findBytes(windows_contract, "credssp-windows-contract") == null or findBytes(windows_contract, "rdpsvc=consumer-only") == null) return modernSecurityBlocker(stats, "r4auth-windows-contract-text");
-    const windows_harness = dispatchProtocolText(app, r4auth_role, r4auth_op_credssp_windows_harness, "", out[0..], stats, "r4auth-windows-harness") orelse return false;
-    if (findBytes(windows_harness, "credssp-windows-harness") == null or findBytes(windows_harness, "tls_pubkey_binding=ok") == null or findBytes(windows_harness, "next=rdpsvc-stream") == null) return modernSecurityBlocker(stats, "r4auth-windows-harness-text");
-    if (findBytes(windows_harness, "mixed_offer=ntlm") == null) return modernSecurityBlocker(stats, "r4auth-windows-mixed-offer");
     stats.r4auth_windows_ok +%= 1;
-    if (!preflightR4AuthLiveCredssp(app, stats, out[0..])) return false;
-
-    var request: [160]u8 = .{0} ** 160;
-    const request_text = buildFixedCredentialRequest(request[0..], config);
-    const auth = dispatchProtocolBytesNoBlocker(app, r4auth_role, r4auth_op_validate_fixed_credentials, request_text, out[0..], stats, "r4auth-validate") orelse return false;
-    if (findBytes(auth, "result=ok") == null or findBytes(auth, "user=r4os") == null or findBytes(auth, "auth_model=fixed-single-user") == null) return modernSecurityBlocker(stats, "r4auth-validate-text");
-    stats.auth_successes +%= 1;
-    stats.security_auth_ok +%= 1;
-    return true;
-}
-
-fn preflightR4AuthLiveCredssp(app: *const App, stats: *ServiceStats, out: []u8) bool {
-    if (r4auth_op_credssp_live_contract != 18 or r4auth_op_credssp_process_live_state != 19 or r4auth_op_credssp_live_harness != 20) return modernSecurityBlocker(stats, "r4auth-live-op-map");
-
-    const live_contract = dispatchProtocolText(app, r4auth_role, r4auth_op_credssp_live_contract, "", out, stats, "r4auth-live-contract") orelse return false;
-    if (findBytes(live_contract, "credssp-live-contract") == null) return modernSecurityBlocker(stats, "r4auth-live-contract-text");
-    if (findBytes(live_contract, "ops=op18:contract,op19:process,op20:harness") == null) return modernSecurityBlocker(stats, "r4auth-live-op-contract");
-    if (findBytes(live_contract, "tls_required=yes") == null) return modernSecurityBlocker(stats, "r4auth-live-tls-contract");
-    if (findBytes(live_contract, "tls_pubkey_hash=R4LK[-32]") == null) return modernSecurityBlocker(stats, "r4auth-live-pubkey-contract");
-    if (findBytes(live_contract, "bad_password=-20") == null) return modernSecurityBlocker(stats, "r4auth-live-password-contract");
-    if (findBytes(live_contract, "kerberos=blocked:-21") == null or findBytes(live_contract, "domain=blocked:-22") == null) return modernSecurityBlocker(stats, "r4auth-live-boundary-contract");
-    if (findBytes(live_contract, "user=r4os;password=rosebud;permissions=none") == null) return modernSecurityBlocker(stats, "r4auth-live-fixed-creds-contract");
-    if (findBytes(live_contract, "rdpsvc=consumer-only;next=rdpsvc-credssp-loop") == null) return modernSecurityBlocker(stats, "r4auth-live-consumer-contract");
-
-    const live_harness = dispatchProtocolText(app, r4auth_role, r4auth_op_credssp_live_harness, "", out, stats, "r4auth-live-harness") orelse return false;
-    if (findBytes(live_harness, "credssp-live-harness") == null) return modernSecurityBlocker(stats, "r4auth-live-harness-text");
-    if (findBytes(live_harness, "negotiate=ok;challenge=ok;authenticate=ok;pubkeyauth=ok") == null) return modernSecurityBlocker(stats, "r4auth-live-flow-harness");
-    if (findBytes(live_harness, "resume=ok") == null) return modernSecurityBlocker(stats, "r4auth-live-resume-harness");
-    if (findBytes(live_harness, "tls_pubkey_binding=from-r4lk") == null) return modernSecurityBlocker(stats, "r4auth-live-binding-harness");
-    if (findBytes(live_harness, "mixed_offer=ntlm") == null) return modernSecurityBlocker(stats, "r4auth-live-mixed-offer");
-    if (findBytes(live_harness, "bad_password=blocked") == null or findBytes(live_harness, "kerberos=blocked") == null or findBytes(live_harness, "domain=blocked") == null or findBytes(live_harness, "missing_tls=blocked") == null) return modernSecurityBlocker(stats, "r4auth-live-negative-harness");
-    if (findBytes(live_harness, "user=r4os;password=rosebud;next=rdpsvc-credssp-loop") == null) return modernSecurityBlocker(stats, "r4auth-live-fixed-creds-harness");
-
     stats.r4auth_live_ok +%= 1;
     stats.r4auth_loop_ok +%= 1;
     return true;
@@ -5944,10 +5934,6 @@ fn preflightR4TlsStreamAdapter(app: *const App, stats: *ServiceStats, stream_con
     if (findBytes(productive, "app_write=op24:R4AW->R4WX") == null) return modernSecurityBlocker(stats, "r4tls-app-write-productive");
     if (findBytes(productive, "app_read=op25:R4AR->R4RX") == null) return modernSecurityBlocker(stats, "r4tls-app-read-productive");
 
-    const selftest = dispatchProtocolText(app, r4tls_role, r4tls_op_selftest, "", out, stats, "r4tls-selftest") orelse return false;
-    if (findBytes(selftest, "R4TLS selftest OK") == null) return modernSecurityBlocker(stats, "r4tls-selftest-text");
-    if (findBytes(selftest, "live=ok") == null) return modernSecurityBlocker(stats, "r4tls-live-selftest");
-    if (findBytes(selftest, "app_write=ok") == null or findBytes(selftest, "app_read=ok") == null) return modernSecurityBlocker(stats, "r4tls-app-selftest");
     stats.r4tls_live_ok +%= 1;
     stats.r4tls_stream_ok +%= 1;
     return true;

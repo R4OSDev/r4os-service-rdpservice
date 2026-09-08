@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.7`
+- Version: `0.1.8`
 - Image target: `/R4OS/SERVICES/RDPSVC.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -46,11 +46,21 @@ and `NOTICE`. Any repository-specific external material is documented in
 `THIRD_PARTY_NOTICES.md`.
 
 
-Sitzungsbesitz ab 0.78.61
------------------------
-RDPSVC erzeugt vor der CredSSP-Schleife per R4AUTH-Op21 eine verbindungseigene
-Challenge, uebergibt sie an Op12 und in jedem R4C2-Frame an Op19 und loescht
-sie beim Verlassen der Schleife. Andere Verbindungen teilen diesen Zustand
-nicht. Die TLS-Handshakes verwenden R4L2; seine privaten Begin-/Finish-Puffer
-werden nach Abschluss oder Fehler geleert. Nur die getrennte Flight wird
-versandt. Phasen-/Kennwort- und vollstaendige Bindungspruefung folgen in62.
+RDPSVC: Anmeldebesitz ab 0.78.62
+------------------------------
+RDPSVC 0.1.8 liest UserName/Password aus SYSTEM\Services\RDPSVC beim Start.
+Die Startvorpruefung validiert nur Konfiguration und Modulvertraege; sie
+fuehrt keine synthetischen Anmeldungen aus und zaehlt keine Auth-Erfolge.
+Nach dem TLS-Handshake liefert R4TLS-Op33 den gebundenen SubjectPublicKey.
+R4AUTH-Op21 eroeffnet daraufhin den opaken Zustand; drei Op19-Schritte
+uebernehmen Type1, Type3 plus pubKeyAuth und abschliessend authInfo.
+Private Zustands-/Eingabepuffer bleiben beim Dienst und werden beim
+Verlassen geleert. Nur die getrennte Netzwerkantwort wird TLS-verschluesselt
+versandt. Der Dienst implementiert keine eigene ASN.1-/NTLM-Kryptografie.
+
+Erst nach vollstaendiger Pruefung zaehlt der Dienst die Anmeldung und
+meldet den gebundenen konfigurierten Benutzer. Die spaetere RDP-Aktivierung
+darf keinen anderen Benutzer einsetzen. Im reinen TLS-Modus ohne CredSSP
+prueft die Aktivierung selbst Benutzer und Kennwort. Fehlerberichte verwenden
+dieselbe konfigurierte Identitaet. Die bestehenden LogPasswords-Einstellungen
+bleiben wirksam; der lokale Test setzt LogPasswords=false.
