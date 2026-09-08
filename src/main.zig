@@ -99,7 +99,7 @@ const tls_content_handshake: u8 = 22;
 const tls_content_application_data: u8 = 23;
 const tls_record_max: usize = 18432;
 const r4tls_live_header_len: usize = 12;
-const r4tls_live_state_max: usize = 8192;
+const r4tls_live_state_max: usize = 104 + 8192;
 const r4tls_live_stream_state_len: usize = 140;
 const r4tls_app_io_header_len: usize = 4 + r4tls_live_stream_state_len;
 const r4tls_dispatch_max: usize = r4tls_app_io_header_len + tls_record_max;
@@ -120,6 +120,7 @@ const r4auth_op_ntlmv2_profile: u32 = 7;
 const r4auth_op_validate_fixed_credentials: u32 = 8;
 const r4auth_op_error_contract: u32 = 9;
 const r4auth_op_credssp_state_contract: u32 = 10;
+const r4auth_op_credssp_begin_session: u32 = 21;
 const r4auth_op_credssp_build_challenge: u32 = 12;
 const r4auth_op_credssp_windows_contract: u32 = 15;
 const r4auth_op_credssp_windows_harness: u32 = 17;
@@ -149,8 +150,8 @@ const r4tls_magic_app_write_in = "R4AW";
 const r4tls_magic_app_write_out = "R4WX";
 const r4tls_magic_app_read_in = "R4AR";
 const r4tls_magic_app_read_out = "R4RX";
-const r4auth_magic_live_state = "R4CL";
-const r4auth_live_header_len: usize = 12;
+const r4auth_magic_live_state = "R4C2";
+const r4auth_live_header_len: usize = 20;
 const r4auth_live_frame_max: usize = r4auth_live_header_len + r4tls_live_stream_state_len + rdp_max_packet;
 const r4auth_live_phase_negotiate: u8 = 1;
 const r4auth_live_phase_authenticate: u8 = 2;
@@ -1960,6 +1961,7 @@ fn runModernTlsWireHandshake(app: *const App, stream: TcpStream, stats: *Service
     if (client_hello[0] != tls_content_handshake) return tlsWireError(stats, "tls-clienthello-type");
 
     var begin_out: [r4tls_dispatch_max]u8 = .{0} ** r4tls_dispatch_max;
+    defer std.crypto.secureZero(u8, &begin_out);
     const begin = dispatchProtocolBytes(app, r4tls_role, r4tls_op_tls12_live_begin, client_hello[0..client_hello_len], begin_out[0..], stats, "r4tls-live-begin") orelse return false;
     const begin_parts = parseR4TlsFramedOutput(begin, r4tls_magic_live_begin, stats, "r4tls-live-begin-frame") orelse return false;
     if (begin_parts.state.len == 0 or begin_parts.state.len > r4tls_live_state_max or begin_parts.payload.len == 0) return tlsWireError(stats, "r4tls-live-begin-size");
@@ -1967,6 +1969,7 @@ fn runModernTlsWireHandshake(app: *const App, stream: TcpStream, stats: *Service
     stats.r4tls_wire_begin_ok +%= 1;
 
     var finish_in: [r4tls_live_state_max + tls_record_max * 3]u8 = .{0} ** (r4tls_live_state_max + tls_record_max * 3);
+    defer std.crypto.secureZero(u8, &finish_in);
     var finish_len: usize = begin_parts.state.len;
     @memcpy(finish_in[0..finish_len], begin_parts.state);
 
@@ -1999,17 +2002,22 @@ fn runModernCredsspLiveLoop(app: *const App, stream: TcpStream, stats: *ServiceS
     var plain: [rdp_max_packet]u8 = .{0} ** rdp_max_packet;
     var state_text: [768]u8 = .{0} ** 768;
     var challenge: [1024]u8 = .{0} ** 1024;
+    // Connection-local state; never taken from client input or shared with another loop.
+    var server_challenge: [8]u8 = undefined;
+    defer std.crypto.secureZero(u8, &server_challenge);
+    const session = dispatchProtocolBytes(app, r4auth_role, r4auth_op_credssp_begin_session, "", &server_challenge, stats, "credssp-session") orelse return false;
+    if (session.len != server_challenge.len) return markCredsspLiveError(stats, "credssp-session-size", r4auth_result_bad_state);
 
     const negotiate_len = tlsWireRead(app, stream, tls, plain[0..], stats, "credssp-negotiate-read", rdp_handshake_timeout_ms) orelse return false;
-    const negotiate_state = dispatchCredsspLiveState(app, stats, tls, r4auth_live_phase_negotiate, plain[0..negotiate_len], state_text[0..], "credssp-negotiate") orelse return false;
+    const negotiate_state = dispatchCredsspLiveState(app, stats, tls, server_challenge, r4auth_live_phase_negotiate, plain[0..negotiate_len], state_text[0..], "credssp-negotiate") orelse return false;
     if (findBytes(negotiate_state, "phase=negotiate") == null or findBytes(negotiate_state, "next=send_challenge") == null) return markCredsspLiveError(stats, "credssp-negotiate-state", r4auth_result_bad_state);
     stats.r4auth_live_negotiate_ok +%= 1;
 
-    const challenge_bytes = dispatchProtocolBytes(app, r4auth_role, r4auth_op_credssp_build_challenge, "", challenge[0..], stats, "credssp-challenge") orelse return false;
+    const challenge_bytes = dispatchProtocolBytes(app, r4auth_role, r4auth_op_credssp_build_challenge, &server_challenge, challenge[0..], stats, "credssp-challenge") orelse return false;
     if (!tlsWireWrite(app, stream, tls, challenge_bytes, stats, "credssp-challenge-write")) return false;
 
     const authenticate_len = tlsWireRead(app, stream, tls, plain[0..], stats, "credssp-authenticate-read", rdp_handshake_timeout_ms) orelse return false;
-    const authenticate_state = dispatchCredsspLiveState(app, stats, tls, r4auth_live_phase_authenticate, plain[0..authenticate_len], state_text[0..], "credssp-authenticate") orelse return false;
+    const authenticate_state = dispatchCredsspLiveState(app, stats, tls, server_challenge, r4auth_live_phase_authenticate, plain[0..authenticate_len], state_text[0..], "credssp-authenticate") orelse return false;
     if (findBytes(authenticate_state, "phase=authenticate") == null or findBytes(authenticate_state, "auth=ok") == null) return markCredsspLiveError(stats, "credssp-authenticate-state", r4auth_result_bad_state);
     stats.r4auth_live_authenticate_ok +%= 1;
     if (findBytes(authenticate_state, "complete=yes") != null) {
@@ -2020,7 +2028,7 @@ fn runModernCredsspLiveLoop(app: *const App, stream: TcpStream, stats: *ServiceS
     if (findBytes(authenticate_state, "next=pubkeyauth") == null) return markCredsspLiveError(stats, "credssp-authenticate-next-state", r4auth_result_bad_state);
 
     const pubkey_len = tlsWireRead(app, stream, tls, plain[0..], stats, "credssp-pubkeyauth-read", rdp_handshake_timeout_ms) orelse return false;
-    const pubkey_state = dispatchCredsspLiveState(app, stats, tls, r4auth_live_phase_pubkeyauth, plain[0..pubkey_len], state_text[0..], "credssp-pubkeyauth") orelse return false;
+    const pubkey_state = dispatchCredsspLiveState(app, stats, tls, server_challenge, r4auth_live_phase_pubkeyauth, plain[0..pubkey_len], state_text[0..], "credssp-pubkeyauth") orelse return false;
     if (findBytes(pubkey_state, "phase=pubkeyauth") == null or findBytes(pubkey_state, "complete=yes") == null or findBytes(pubkey_state, "auth=ok") == null) return markCredsspLiveError(stats, "credssp-pubkeyauth-state", r4auth_result_bad_state);
     stats.r4auth_live_pubkey_ok +%= 1;
     return finishModernCredsspLiveLoop(app, stats, config);
@@ -2038,9 +2046,9 @@ fn finishModernCredsspLiveLoop(app: *const App, stats: *ServiceStats, config: *c
     return true;
 }
 
-fn dispatchCredsspLiveState(app: *const App, stats: *ServiceStats, tls: *const TlsWireState, phase: u8, tsrequest: []const u8, out: []u8, label: []const u8) ?[]const u8 {
+fn dispatchCredsspLiveState(app: *const App, stats: *ServiceStats, tls: *const TlsWireState, server_challenge: [8]u8, phase: u8, tsrequest: []const u8, out: []u8, label: []const u8) ?[]const u8 {
     var frame: [r4auth_live_frame_max]u8 = .{0} ** r4auth_live_frame_max;
-    const frame_len = buildCredsspLiveStateFrame(frame[0..], phase, tls, tsrequest) orelse {
+    const frame_len = buildCredsspLiveStateFrame(frame[0..], phase, tls, server_challenge, tsrequest) orelse {
         _ = markCredsspLiveError(stats, "credssp-frame", r4auth_result_bad_state);
         return null;
     };
@@ -2068,7 +2076,7 @@ fn dispatchCredsspLiveState(app: *const App, stats: *ServiceStats, tls: *const T
     return out[0..@intCast(out_buffer.len)];
 }
 
-fn buildCredsspLiveStateFrame(out: []u8, phase: u8, tls: *const TlsWireState, tsrequest: []const u8) ?usize {
+fn buildCredsspLiveStateFrame(out: []u8, phase: u8, tls: *const TlsWireState, server_challenge: [8]u8, tsrequest: []const u8) ?usize {
     if (!tls.active) return null;
     const total = r4auth_live_header_len + tls.stream_state.len + tsrequest.len;
     if (total > out.len) return null;
@@ -2078,6 +2086,7 @@ fn buildCredsspLiveStateFrame(out: []u8, phase: u8, tls: *const TlsWireState, ts
     out[6] = r4auth_live_flag_tls;
     out[7] = 0;
     writeLe32(out[8..12], @intCast(tls.stream_state.len));
+    @memcpy(out[12..20], &server_challenge);
     @memcpy(out[r4auth_live_header_len .. r4auth_live_header_len + tls.stream_state.len], tls.stream_state[0..]);
     if (tsrequest.len != 0) @memcpy(out[r4auth_live_header_len + tls.stream_state.len .. total], tsrequest);
     return total;

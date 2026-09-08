@@ -126,7 +126,7 @@ ChangeCipherSpec, Client-Finished, Server-Finished und Sequenzen. RDPSVC
 nutzt diese Logik seit 0.55.29 als Protocol-Vertrag und baut sie nicht
 privat nach.
 Seit 0.55.28 besitzt R4AUTH die Windows-nahe CredSSP/PubKeyAuth-Kante ueber
-`R4CW`-Frames mit TLS-Public-Key-Hash. RDPSVC baut auch diese Logik nicht
+`R4W2`-Frames mit TLS-Public-Key-Hash. RDPSVC baut auch diese Logik nicht
 privat nach; seit 0.55.29 konsumiert der Dienst den Windows-Harness als
 Vorstufe zur finalen mstsc-End-to-End-Abnahme.
 Seit 0.55.29 ist diese RDPSVC-Unterversion umgesetzt: R4TLS-Session-Harness
@@ -134,12 +134,12 @@ und R4AUTH-Windows-Harness werden vom Dienst als Protocol-Consumer genutzt.
 Der Service preflightet diese Vertraege als ModernSecurityProfile, bevor
 Session-Worker Clients annehmen.
 Seit 0.55.30 besitzt R4TLS die Live-Session-API `op22`/`op23` mit
-`R4LB`/`R4LS` und `R4LF`/`R4LK`. RDPSVC baut diese TLS-Sessionlogik weiter
+`R4LB`/`R4L2` und `R4LF`/`R4LK`. RDPSVC baut diese TLS-Sessionlogik weiter
 nicht privat nach; die naechste RDPSVC-Arbeit ist ein Streamadapter, der
 verschluesselte R4TLS-Application-Records konsumiert und danach R4AUTH-
 CredSSP sowie RDP-Aktivierung ueber diesen geschuetzten Stream fuehrt.
 Seit 0.55.31 besitzt R4AUTH dafuer den Live-CredSSP-Vertrag `op18`/`op19`/
-`op20` ueber `R4CL` mit eingebettetem `R4LK`. RDPSVC bleibt in dieser
+`op20` ueber `R4C2` mit eingebettetem `R4LK`. RDPSVC bleibt in dieser
 Unterversion bewusst unveraendert und konsumiert diesen Live-State erst in den
 Folgeschritten.
 Seit 0.55.32 ist der RDPSVC-R4TLS-Streamadapter als Preflight-Vertrag
@@ -154,7 +154,7 @@ R4OS-Zugangsdaten `r4os`/`rosebud`, die R4LK-Public-Key-Bindung und die
 negativen Fehlerpfade fuer falsches Passwort, Kerberos, Domain, kaputte
 TSRequest und fehlenden TLS-Kontext. `SERVMAN STATUS RDPSVC` zeigt dafuer
 `credssp_live` und `credssp_loop`; RDPSVC bleibt trotzdem nur Consumer und
-fuehrt keine eigene R4CL-, R4LK-, SPNEGO-, NTLM- oder Kryptografie-Logik.
+fuehrt keine eigene R4C2-, R4LK-, SPNEGO-, NTLM- oder Kryptografie-Logik.
 Seit 0.55.34 fuehrt RDPSVC nach dem ModernSecurityProfile die normale
 RDP-Aktivierung ueber einen expliziten `modern_protected`-Aktivierungsmodus
 weiter. `modern_active` wird dadurch erst nach MCS, Client Info, Demand/Confirm
@@ -181,7 +181,7 @@ R4TLS verlangt fuer diesen TLS-1.2-Pfad keinen TLS-1.3-`key_share` im
 ClientHello; der Client-Public-Key kommt aus ClientKeyExchange in `op23`.
 Seit 0.55.37 fuehrt RDPSVC die CredSSP-Live-Schleife ueber genau diesen
 R4TLS-Wire-Adapter. Der Dienst liest Negotiate, Authenticate und PubKeyAuth
-ueber `tlsWireRead`, baut nur den `R4CL`-Rahmen mit opakem `R4LK`, ruft R4AUTH
+ueber `tlsWireRead`, baut nur den `R4C2`-Rahmen mit opakem `R4LK`, ruft R4AUTH
 `op19` auf und schreibt die von R4AUTH `op12` erzeugte NTLM-Challenge ueber
 `tlsWireWrite` zurueck. Die feste Anmeldung bleibt `r4os`/`rosebud`;
 Bad-Password, Bad-PubKeyAuth, Kerberos, Domain und Bad-TSRequest werden als
@@ -470,3 +470,13 @@ MS-RDPNSC. Die separat unter `ExFiles/Reference/XRDP` liegende
 Apache-2.0-Referenz wurde nur fuer einen unabhaengigen Wireformat-Gegencheck
 gelesen; es ist kein externer Codecquelltext oder sonstiges Fremdmaterial in
 RDPSVC eingebunden.
+
+
+Sitzungsbesitz ab 0.78.61
+-----------------------
+RDPSVC erzeugt vor der CredSSP-Schleife per R4AUTH-Op21 eine verbindungseigene
+Challenge, uebergibt sie an Op12 und in jedem R4C2-Frame an Op19 und loescht
+sie beim Verlassen der Schleife. Andere Verbindungen teilen diesen Zustand
+nicht. Die TLS-Handshakes verwenden R4L2; seine privaten Begin-/Finish-Puffer
+werden nach Abschluss oder Fehler geleert. Nur die getrennte Flight wird
+versandt. Phasen-/Kennwort- und vollstaendige Bindungspruefung folgen in62.
