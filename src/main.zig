@@ -2534,6 +2534,7 @@ fn runRdpSessionLoop(app: *const App, stream: TcpStream, transport: RdpTransport
     // mstsc bekommt das Bild in verdaulichen Haeppchen. paint_y = naechste
     // noch zu malende Zeile; paint_active=false sobald der Schirm steht.
     var paint_y: u32 = 0;
+    var paint_revision: u32 = 0;
     var paint_active = true;
     var input_repaint_done = false;
     var cursor_track: CursorTrack = .{};
@@ -2598,8 +2599,12 @@ fn runRdpSessionLoop(app: *const App, stream: TcpStream, transport: RdpTransport
             // Naechsten Streifen des Initial-/Repaint-Schirms senden. Klein
             // genug, dass Input/TCP zwischen den Streifen zum Zug kommen.
             if (sendBitmapStripe(app, stream, transport, scratch, stats, &bitmap_cache, paint_y, rdp_session_stripe_rows)) {
+                // Each stripe has an immutable snapshot, but publication may
+                // advance between stripes. Preserve the FIRST revision so the
+                // following update also repairs changes in earlier stripes.
+                if (paint_y == 0) paint_revision = stats.last_frame_revision;
                 paint_y += rdp_session_stripe_rows;
-                last_rev = stats.last_frame_revision;
+                last_rev = paint_revision;
                 last_frame_ticks = app.sys.ticks();
                 const painted_height = stats.session_height;
                 if (painted_height != 0 and paint_y >= painted_height) paint_active = false;
@@ -3707,10 +3712,27 @@ fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, 
         return false;
     }
 
-    const info = if (require_new)
+    var info = if (require_new)
         waitForRemoteFrameAfter(app, stats, last_revision) orelse return false
     else
         waitForRemoteFrame(app, stats) orelse return false;
+    var snapshot_info: r4os.abi.RemoteFrameInfo = .{};
+    var snapshot: r4os.abi.RemoteFrameLease = .{};
+    const acquire_until = app.sys.ticks() +| app.sys.ticksFromMilliseconds(250);
+    while (app.desk.remoteFrameSnapshotAcquire(0, &snapshot_info, &snapshot) != 0) {
+        if (app.sys.ticks() >= acquire_until) { setLastError(stats, "frame-snapshot-unavailable"); return false; }
+        app.sys.sleepTicks(1);
+    }
+    defer _ = app.desk.remoteFrameSnapshotRelease(&snapshot);
+    // If publication advanced since the damage query, send this coherent
+    // latest snapshot in full. No mixed revisions escape into a wire frame.
+    if (snapshot_info.revision != info.revision) {
+        info = snapshot_info; info.dirty_x = 0; info.dirty_y = 0;
+        info.dirty_w = info.width; info.dirty_h = info.height;
+    }
+    if (snapshot.id == 0 or snapshot.pixels_addr == 0 or snapshot.capacity_pixels < info.frame_pixels) {
+        setLastError(stats, "frame-snapshot-invalid"); return false;
+    }
     if (!frameMatchesSession(app, stream, stats, &info)) return false;
     const geometry = bitmap_geometry.sessionGeometry(stats.session_width, stats.session_height) orelse {
         stats.bitmap_errors +%= 1;
@@ -3780,25 +3802,7 @@ fn sendBitmapFrame(app: *const App, stream: TcpStream, transport: RdpTransport, 
     var rect_body_pos: usize = 0;
     var rect_count: u16 = 0;
 
-    // Pro Frame wird ein stabiler Kernel-Snapshot gemappt. generation muss
-    // zur zuvor gelesenen Revision passen; bei einem Publish im Zwischenraum
-    // wird vor dem ersten Netzwerk-Write verworfen und neu angesetzt.
-    var shared_pixels: ?[*]const u32 = null;
-    {
-        var map_info: r4os.abi.RemoteFrameMapInfo = .{};
-        const map_rc = app.desk.remoteFrameMap(&map_info);
-        if (map_rc == 0) {
-            if (map_info.pixels_addr == 0 or
-                map_info.capacity_pixels < @as(u64, info.width) * @as(u64, info.height) or
-                map_info.generation != info.revision)
-            {
-                stats.bitmap_errors +%= 1;
-                setLastError(stats, "frame-snapshot-change");
-                return false;
-            }
-            shared_pixels = @ptrFromInt(map_info.pixels_addr);
-        }
-    }
+    const shared_pixels: ?[*]const u32 = @ptrFromInt(snapshot.pixels_addr);
 
     if (clientNscodecReady(stats)) {
         const adaptive_metrics = sendAdaptiveNscodecRect(app, stream, transport, out, stats, bitmap_cache, &info, rect, shared_pixels) orelse return false;
