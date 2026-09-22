@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.8`
+- Version: `0.1.10`
 - Image target: `/R4OS/SERVICES/RDPSVC.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -64,3 +64,9 @@ darf keinen anderen Benutzer einsetzen. Im reinen TLS-Modus ohne CredSSP
 prueft die Aktivierung selbst Benutzer und Kennwort. Fehlerberichte verwenden
 dieselbe konfigurierte Identitaet. Die bestehenden LogPasswords-Einstellungen
 bleiben wirksam; der lokale Test setzt LogPasswords=false.
+
+Version 0.1.10 emits NSCodec planes in bottom-up wire order while the
+capture input and local decoder remain top-down. A synchronization-only
+input PDU is accepted without creating a desktop event or reporting an error.
+The existing codec checks include an asymmetric literal-plane fixture.
+Reference: [FreeRDP 3.15.0 NSCodec encoder](https://github.com/FreeRDP/FreeRDP/blob/3.15.0/libfreerdp/codec/nsc_encode.c).

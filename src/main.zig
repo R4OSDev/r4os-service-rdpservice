@@ -3235,7 +3235,9 @@ fn parseAndPushInputPdu(app: *const App, packet: []const u8, stats: *ServiceStat
         pushed +%= 1;
         pos += 12;
     }
-    if (pushed == 0) return inputBool(stats, "input-empty");
+    // A valid synchronization-only PDU updates lock state at the client.
+    // It needs no desktop event and is not a failed keyboard/mouse input.
+    if (count == 0) return inputBool(stats, "input-empty");
     stats.input_pdus +%= 1;
     setLastError(stats, "input-ok");
     return true;

@@ -1,4 +1,4 @@
-﻿Aktueller Stand: 0.79.32. Der folgende Migrationsverlauf ist historisch;
+﻿Aktueller Stand: 0.80.32. Der folgende Migrationsverlauf ist historisch;
 fuer die Anmeldung gilt ausschliesslich der aktuelle Vertrag am Dateiende.
 
 RDPSVC.R4X
@@ -504,3 +504,11 @@ gestreifte Erstbild merkt seine erste Revision fuer das anschliessende Update;
 zwischen den Streifen geaenderte Pixel werden vollstaendig nachgezogen.
 Die Authentisierung wird durch diese Aenderung nicht veraendert.
 Aktueller Capturevertrag: Docs/Drivers/GrafikCapture07932.txt im Workspace.
+
+0.80.32 / RDPSVC 0.1.10
+----------------------
+NSCodec serialisiert die Farbebenen Bottom-up; Capture und der lokale
+Decoder verwenden weiter Top-down. Eine unabhaengige asymmetrische
+Literalfolge sichert die Drahtreihenfolge, der echte FreeRDP-Lauf prueft
+die sichtbare Ausgabe. Reine Eingabesynchronisations-PDUs benoetigen kein
+Desktopereignis und werden ohne falschen Eingabefehler akzeptiert.

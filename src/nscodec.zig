@@ -166,7 +166,8 @@ pub fn encodeXrgb32(
 
     var i: usize = 0;
     while (i < pixel_count) : (i += 1) {
-        const pixel = pixels[i];
+        // NSCodec planes are bottom-up; callers provide top-down snapshots.
+        const pixel = pixels[(height - 1 - i / width) * width + i % width];
         const red: i16 = @intCast((pixel >> 16) & 0xff);
         const green: i16 = @intCast((pixel >> 8) & 0xff);
         const blue: i16 = @intCast(pixel & 0xff);
@@ -224,7 +225,7 @@ pub fn encodeXrgb32(
 
 /// Decodes the conservative R4OS NSCodec profile. This is kept beside the
 /// encoder so host and guest self-tests can compare the visible end state
-/// without relying on a second codec implementation.
+/// as top-down pixels. Wire row ordering is also checked independently.
 pub fn decodeXrgb32(
     encoded: []const u8,
     width: usize,
@@ -271,7 +272,7 @@ pub fn decodeXrgb32(
         const red = clampByte(luma + @divTrunc(orange - green_chroma, 2));
         const green = clampByte(luma + @divTrunc(green_chroma, 2));
         const blue = clampByte(luma - @divTrunc(orange + green_chroma, 2));
-        out[i] = (@as(u32, red) << 16) | (@as(u32, green) << 8) | blue;
+        out[(height - 1 - i / width) * width + i % width] = (@as(u32, red) << 16) | (@as(u32, green) << 8) | blue;
     }
     return .{ .width = width, .height = height };
 }
@@ -467,6 +468,12 @@ test "mixed colors decode within the fixed CLL1 visible bound" {
         try testing.expect(channelDelta(source, visible, 8) <= 2);
         try testing.expect(channelDelta(source, visible, 0) <= 2);
     }
+    // An asymmetric literal plane verifies wire orientation without the
+    // paired decoder: last scanline must precede the first scanline.
+    const gray = [_]u32{ 0x010101, 0x020202, 0x030303, 0x040404, 0x050505, 0x060606 };
+    const small = encodeXrgb32(&gray, 2, 3, &workspace, &encoded).?;
+    try testing.expect(small.bytes > 26 and readLe32(encoded[0..4]) == 6);
+    try testing.expectEqualSlices(u8, &.{ 5, 6, 3, 4, 1, 2 }, encoded[20..26]);
 }
 
 test "long runs and terminal literals round trip" {
