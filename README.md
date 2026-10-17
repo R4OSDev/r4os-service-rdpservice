@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.10`
+- Version: `0.1.11`
 - Image target: `/R4OS/SERVICES/RDPSVC.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
