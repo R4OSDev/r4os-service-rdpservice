@@ -108,11 +108,13 @@ Nuetzliche Aufrufe:
 
     SERVMAN STATUS RDPSVC
 
-Host-Abnahme:
+Historischer Testaufbau:
 
     Tests/Runtime/Run-RdpServiceLiveTest.ps1
 
-Der Host-Test baut ein Testimage mit normaler Desktop-Shell, aktiviert die
+Dieser Pfad gehoert zur damaligen Workspace-Struktur. Aktuelle
+Migrationsabnahmen stehen projektweit in Docs/API/ConsumerMigration.txt.
+Der damalige Host-Test baut ein Testimage mit normaler Desktop-Shell, aktiviert die
 RDP-Sitzung ueber `127.0.0.1:13389`, validiert die empfangenen Bitmap-PDUs
 bytegenau und sendet danach eine deterministische Eingabesequenz mit
 Mausbewegung, Klick, Wheel und Unicode-Taste. Seit 0.52.17 fuehrt der Test
