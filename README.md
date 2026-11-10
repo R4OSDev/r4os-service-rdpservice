@@ -4,10 +4,14 @@
 
 ## Package
 
-- Version: `0.1.11`
+- Version: see `module.R4MF`
 - Image target: `/R4OS/SERVICES/RDPSVC.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
+
+RDPSVC runs as a Start2 service. A fragmented record is read with one
+deadline for its remaining bytes. During shutdown, thread readiness wakes
+the service; successful join of the exact worker releases its session.
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.

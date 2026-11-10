@@ -274,7 +274,7 @@ const App = struct {
     desk: r4os.r4desk.Context,
     dev: r4os.r4dev.Context,
 
-    fn init(r4_app: *r4os.App) ?App {
+    fn init(r4_app: *r4os.App2) ?App {
         return .{
             .sys = r4_app.system(),
             .net = r4_app.networkLowLevel() orelse return null,
@@ -553,11 +553,15 @@ fn sessionResultName(result: SessionResult) []const u8 {
     };
 }
 
-pub fn r4_app_main(r4_app: *r4os.App) i32 {
+pub fn r4_app_main(r4_app: *r4os.App2) i32 {
     var app = App.init(r4_app) orelse return r4os.abi.err_no_group;
-    if (hasArg(app.sys.argsRaw(), selftest_arg)) return runSelfTest(&app);
-    if (hasArg(app.sys.argsRaw(), ping_arg)) return runPingClient(&app);
-    if (hasArg(app.sys.argsRaw(), status_arg)) return runStatusClient(&app);
+    const action = serviceAction(r4_app) catch return r4os.abi.service_api_result_invalid;
+    switch (action) {
+        .selftest => return runSelfTest(&app),
+        .ping => return runPingClient(&app),
+        .status => return runStatusClient(&app),
+        .run => {},
+    }
     return runService(&app);
 }
 
@@ -581,8 +585,14 @@ fn runService(app: *const App) i32 {
 
     var info: r4os.abi.ServiceInfo = .{};
     var endpoint_handle: u32 = 0;
-    var waited: u32 = 0;
-    while (waited < service_register_wait_ticks and endpoint_handle == 0) : (waited += 1) {
+    const actual = app.sys.base.generation2 orelse return r4os.abi.err_no_group;
+    const clock = r4os.inventory_reader.PlatformClock.fromContext2(actual) catch return r4os.abi.err_no_fn;
+    var registration = r4os.rpc_budget.Budget.fromTicks(clock.read, service_register_wait_ticks) catch |err| return r4os.rpc_budget.code(err);
+    while (endpoint_handle == 0 and !app.sys.programShouldClose()) {
+        _ = registration.remainingTicks() catch |err| {
+            if (err == error.TimedOut) break;
+            return r4os.rpc_budget.code(err);
+        };
         const rc = app.sys.serviceEndpointRegister(service_name, 0, &info);
         if (rc == r4os.abi.service_api_result_ok and info.handle != 0) {
             endpoint_handle = info.handle;
@@ -629,6 +639,7 @@ fn runService(app: *const App) i32 {
                 const rc = service_loop.drain(pending, handleRequest, .{ app, endpoint_handle, &stats, &config });
                 if (rc >= 0) continue;
                 closeListener(app, config.listen_port, &stats);
+                stopSessionWorkers(app, &stats, sessions[0..]);
                 _ = app.sys.serviceEndpointUnregister(endpoint_handle);
                 logStopSummary(app, &stats, "endpoint-request");
                 return rc;
@@ -637,6 +648,7 @@ fn runService(app: *const App) i32 {
             .stop => break,
             .failure => |raw| {
                 closeListener(app, config.listen_port, &stats);
+                stopSessionWorkers(app, &stats, sessions[0..]);
                 _ = app.sys.serviceEndpointUnregister(endpoint_handle);
                 logStopSummary(app, &stats, "endpoint-wait");
                 return raw;
@@ -1046,6 +1058,11 @@ fn pollClient(app: *const App, stats: *ServiceStats, config: *const Config, mode
     var accept: r4os.abi.TcpAcceptResult = .{};
     var structured: r4os.abi.NetServiceTcpResult = .{};
     const rc = app.net.tcpAcceptPollServiceResultWait(config.listen_port, &accept, &structured, tcpServiceWaitTicks(app));
+    if (rc < 0 and acceptLostListener(&structured)) {
+        stats.listen_ready = 0;
+        _ = listenOnce(app, config.listen_port, stats, tcpServiceWaitTicks(app));
+        return false;
+    }
     if (rc == 0) return false;
     if (rc < 0) {
         stats.tcp_errors +%= 1;
@@ -1184,11 +1201,11 @@ fn pollSessionWorkers(app: *const App, stats: *ServiceStats, sessions: []Session
         var exit_code: i32 = 0;
         const wait_ticks: u64 = if (stopping) session_stop_join_ticks else 0;
         const join_rc = app.sys.threadHandleJoin(&slot.thread_handle, wait_ticks, &exit_code);
-        if (join_rc == r4os.abi.thread_error_timeout) continue;
+        if (join_rc == r4os.abi.thread_error_timeout or join_rc == r4os.abi.thread_error_busy) continue;
         if (join_rc != r4os.abi.thread_ok) {
+            // Only a successful join retires the worker and its borrowed
+            // session/app storage. A provider error is not a join receipt.
             stats.session_worker_join_errors +%= 1;
-            stats.active_sessions -|= 1;
-            slot.* = .{};
             continue;
         }
         slot.exit_code = exit_code;
@@ -1201,11 +1218,41 @@ fn stopSessionWorkers(app: *const App, stats: *ServiceStats, sessions: []Session
     while (i < sessions.len) : (i += 1) {
         if (sessions[i].used and sessions[i].stream.service_handle != 0) _ = app.net.tcpAbortServiceWait(sessions[i].stream.service_handle, tcpServiceCleanupWaitTicks(app));
     }
-    var waited: u32 = 0;
-    while (waited < 8 and stats.active_sessions != 0) : (waited += 1) {
-        pollSessionWorkers(app, stats, sessions, true);
+    // Readiness only wakes the owner. Each exact worker is retired by a
+    // successful join, not by an event, timeout or failed abort.
+    var set: r4os.wait_set.Set = undefined;
+    const actual = app.sys.base.generation2;
+    const created = if (actual) |ctx| r4os.wait_set.Set.init(ctx, @intCast(sessions.len), &set) == 0 else false;
+    defer if (created) {
+        while (set.handle != 0 and set.close() != 0) app.sys.sleepTicks(1);
+    };
+    var enrolled: usize = 0;
+    if (created) {
+        for (sessions, 0..) |slot, index| {
+            if (!slot.used) continue;
+            var source: r4os.abi.WaitSource = .{};
+            if (r4os.wait_set.prepare(actual.?, r4os.wait_set.thread(slot.thread_handle, index), &source) != 0) continue;
+            var registration: u64 = 0;
+            if (set.enroll(source, &registration) == 0) enrolled += 1;
+        }
+    }
+    while (stats.active_sessions != 0) {
+        pollSessionWorkers(app, stats, sessions, enrolled == 0);
+        if (stats.active_sessions == 0) break;
+        if (enrolled != 0 and waitForWorkerSignal(app, &set)) continue;
         app.sys.sleepTicks(1);
     }
+}
+
+fn waitForWorkerSignal(app: *const App, set: *r4os.wait_set.Set) bool {
+    const time = r4os.time_contract.checked;
+    const now = app.sys.base.clockSampleChecked() catch return false;
+    const ns = time.scaleCeil(session_stop_join_ticks, r4os.abi.nanoseconds_per_second, now.identity.tick_hz) catch return false;
+    const budget = time.DeadlineBudget.init(now, .{ .kind = r4os.abi.timeout_kind_finite, .nanoseconds = ns }) catch return false;
+    const limit = r4os.wait_set.deadline(budget) catch return false;
+    var events: [session_worker_slots_max]r4os.abi.WaitSetEvent = undefined;
+    var batch: r4os.abi.WaitSetBatch = .{};
+    return set.wait(limit, &events, &batch) >= 0;
 }
 
 fn closeTcpHandle(app: *const App, handle: u32, stats: *ServiceStats) bool {
@@ -1821,18 +1868,26 @@ fn buildConnectionConfirm(out: []u8, initial: *const RdpInitial) ?usize {
 }
 
 fn readExact(app: *const App, stream: TcpStream, out: []u8, timeout_ticks: u64) bool {
-    var offset: usize = 0;
-    const start = app.sys.ticks();
-    while (offset < out.len and app.sys.ticks() - start < timeout_ticks) {
-        const got = app.net.tcpReadWaitServiceBounded(stream.service_handle, out[offset..], app.sys.ticksFromMilliseconds(50), tcpServiceWaitTicks(app));
-        if (got < 0) return false;
-        if (got == 0) {
-            app.sys.sleepTicks(1);
-            continue;
-        }
-        offset += @intCast(got);
+    if (out.len == 0) return true;
+    if (timeout_ticks == 0) return false;
+    const transfer = r4os.stream_transfer;
+    const time = r4os.time_contract.checked;
+    const actual = app.sys.base.generation2 orelse return false;
+    var clock = transfer.adapters.PlatformClock.fromContext2(actual) catch return false;
+    var initial: time.ClockSample = .{};
+    if (transfer.adapters.PlatformClock.sample(&clock, &initial) != 0) return false;
+    const ns = time.scaleCeil(timeout_ticks, r4os.abi.nanoseconds_per_second, initial.identity.tick_hz) catch return false;
+    var reader = transfer.Transfer.init(.read_exact, out.len, initial, .{ .kind = r4os.abi.timeout_kind_finite, .nanoseconds = ns }) catch return false;
+    var endpoint: r4os.abi.ServiceInfo = .{};
+    if (app.sys.serviceOpen("TCPSVC", &endpoint) != 0 or endpoint.handle == 0) return false;
+    defer _ = app.sys.serviceClose(endpoint.handle);
+    var tcp = transfer.adapters.Tcp.fromContext2(actual, endpoint.handle, stream.service_handle) catch return false;
+    while (true) {
+        const progress = reader.readStep(out[@intCast(reader.bytes)..], r4os.abi.net_service_tcp_read_max, app.sys.programShouldClose(), transfer.adapters.PlatformClock.sample, &clock, transfer.adapters.Tcp.read, &tcp) catch return false;
+        if (progress.flags & transfer.core.terminal != 0)
+            return progress.outcome == @intFromEnum(transfer.Outcome.complete);
+        if (progress.last_bytes == 0) app.sys.sleepTicks(1);
     }
-    return offset == out.len;
 }
 
 fn prepareModernSecurityProfile(app: *const App, stats: *ServiceStats, config: *const Config) ModernSecurityProfile {
@@ -5206,30 +5261,45 @@ fn protocolNull(stats: *ServiceStats, label: []const u8) ?[]const u8 {
     return null;
 }
 
+fn listenOnce(app: *const App, port: u16, stats: *ServiceStats, ticks: u64) bool {
+    var result: r4os.abi.NetServiceTcpResult = .{};
+    const rc = app.net.tcpListenServiceResultWait(port, &result, ticks);
+    stats.last_tcp_result = if (rc == 0) result.result else rc;
+    if (rc != 0 or result.result != r4os.abi.tcp_result_ok) return false;
+    stats.listen_ready = 1;
+    setLastError(stats, "listen-ready");
+    app.sys.write("RDPSVC listen ");
+    app.sys.printU64(port);
+    app.sys.println(": ready");
+    return true;
+}
+
 fn waitForListen(app: *const App, port: u16, stats: *ServiceStats) bool {
-    var waited: u32 = 0;
-    while (waited < listen_wait_ticks) : (waited += 1) {
-        var result: r4os.abi.NetServiceTcpResult = .{};
-        const rc = app.net.tcpListenServiceResultWait(port, &result, tcpServiceWaitTicks(app));
-        stats.last_tcp_result = if (rc == 0) result.result else rc;
-        if (rc == 0 and result.result == r4os.abi.tcp_result_ok) {
-            stats.listen_ready = 1;
-            setLastError(stats, "listen-ready");
-            app.sys.write("RDPSVC listen ");
-            app.sys.printU64(@intCast(port));
-            app.sys.println(": ready");
-            return true;
-        }
-        if (waited == 0) {
-            app.sys.write("RDPSVC waiting for TCPSVC/network on port ");
-            app.sys.printU64(@intCast(port));
-            app.sys.println("");
-        }
+    const actual = app.sys.base.generation2 orelse return false;
+    const clock = r4os.inventory_reader.PlatformClock.fromContext2(actual) catch return false;
+    var budget = r4os.rpc_budget.Budget.fromTicks(clock.read, listen_wait_ticks) catch return false;
+    var first = true;
+    while (!app.sys.programShouldClose()) {
+        const left = budget.remainingTicks() catch break;
+        if (listenOnce(app, port, stats, @min(left, tcpServiceWaitTicks(app)))) return true;
+        if (first) app.sys.println("RDPSVC waiting for TCPSVC/network");
+        first = false;
         app.sys.sleepTicks(1);
     }
     stats.tcp_errors +%= 1;
     setLastError(stats, "listen-timeout");
     return false;
+}
+
+// A structured listener failure is different from an empty accept or an
+// unavailable RPC. Re-register the same port; never discard a session here.
+fn acceptLostListener(result: *const r4os.abi.NetServiceTcpResult) bool {
+    return result.action == r4os.abi.net_service_tcp_action_accept_poll and
+        result.result == r4os.abi.tcp_result_bad_state and
+        result.conn_id == 0 and
+        result.flags & r4os.abi.net_service_tcp_flag_lifecycle_valid != 0 and
+        (result.lifecycle_cause == r4os.abi.net_service_socket_lifecycle_timeout or
+        result.lifecycle_cause == r4os.abi.net_service_socket_lifecycle_bad_handle);
 }
 
 fn closeListener(app: *const App, port: u16, stats: *ServiceStats) void {
@@ -6123,15 +6193,20 @@ fn fail(app: *const App, label: []const u8) i32 {
     return 1;
 }
 
-fn hasArg(args: [*:0]const u8, wanted: []const u8) bool {
-    var offset: usize = 0;
-    while (offset < 256 and args[offset] != 0) {
-        while (offset < 256 and (args[offset] == ' ' or args[offset] == '\t')) : (offset += 1) {}
-        const start = offset;
-        while (offset < 256 and args[offset] != 0 and args[offset] != ' ' and args[offset] != '\t') : (offset += 1) {}
-        if (equalsIgnoreCase(args[start..offset], wanted)) return true;
+const ServiceAction = enum(u8) { run, status, ping, selftest };
+
+fn serviceAction(app: *const r4os.App2) r4os.arguments.Error!ServiceAction {
+    const raw = app.args();
+    var failure: r4os.arguments.Failure = .{};
+    var cursor = try app.argCursor(.{ .quotes = @intFromEnum(r4os.arguments.Quotes.none), .max_bytes = 256 }, &failure);
+    var action: ServiceAction = .run;
+    while (try cursor.next()) |token| {
+        const arg = try token.bytes(raw);
+        if (std.ascii.eqlIgnoreCase(arg, selftest_arg)) action = .selftest;
+        if (@intFromEnum(action) < @intFromEnum(ServiceAction.ping) and std.ascii.eqlIgnoreCase(arg, ping_arg)) action = .ping;
+        if (action == .run and std.ascii.eqlIgnoreCase(arg, status_arg)) action = .status;
     }
-    return false;
+    return action;
 }
 
 fn copyFixedZ(dest: []u8, src: []const u8) void {
@@ -6190,37 +6265,42 @@ fn appendI32(dest: []u8, pos: *usize, value: i32) void {
 }
 
 fn putByte(dest: []u8, pos: *usize, value: u8) bool {
-    if (pos.* >= dest.len) return false;
-    dest[pos.*] = value;
-    pos.* += 1;
+    var writer = r4os.binary_cursor.Writer.init(dest) catch return false;
+    writer.position = pos.*;
+    writer.writeInt(u8, value, .little) catch return false;
+    pos.* = writer.position;
     return true;
 }
 
 fn putBytes(dest: []u8, pos: *usize, value: []const u8) bool {
-    if (pos.* + value.len > dest.len) return false;
-    if (value.len != 0) @memcpy(dest[pos.* .. pos.* + value.len], value);
-    pos.* += value.len;
+    var writer = r4os.binary_cursor.Writer.init(dest) catch return false;
+    writer.position = pos.*;
+    writer.put(value) catch return false;
+    pos.* = writer.position;
     return true;
 }
 
 fn putBe16(dest: []u8, pos: *usize, value: u16) bool {
-    if (pos.* + 2 > dest.len) return false;
-    writeBe16(dest[pos.* .. pos.* + 2], value);
-    pos.* += 2;
+    var writer = r4os.binary_cursor.Writer.init(dest) catch return false;
+    writer.position = pos.*;
+    writer.writeInt(u16, value, .big) catch return false;
+    pos.* = writer.position;
     return true;
 }
 
 fn putLe16(dest: []u8, pos: *usize, value: u16) bool {
-    if (pos.* + 2 > dest.len) return false;
-    writeLe16(dest[pos.* .. pos.* + 2], value);
-    pos.* += 2;
+    var writer = r4os.binary_cursor.Writer.init(dest) catch return false;
+    writer.position = pos.*;
+    writer.writeInt(u16, value, .little) catch return false;
+    pos.* = writer.position;
     return true;
 }
 
 fn putLe32(dest: []u8, pos: *usize, value: u32) bool {
-    if (pos.* + 4 > dest.len) return false;
-    writeLe32(dest[pos.* .. pos.* + 4], value);
-    pos.* += 4;
+    var writer = r4os.binary_cursor.Writer.init(dest) catch return false;
+    writer.position = pos.*;
+    writer.writeInt(u32, value, .little) catch return false;
+    pos.* = writer.position;
     return true;
 }
 
